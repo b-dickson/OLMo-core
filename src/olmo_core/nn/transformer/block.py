@@ -2,9 +2,6 @@ import math
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union, cast
 
-from olmo_core.nn.fla import FLAConfig
-from olmo_core.nn.mamba import MambaConfig
-from olmo_core.nn.xlstm import XLSTMConfig
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
@@ -15,6 +12,9 @@ from torch.distributed.tensor.parallel import PrepareModuleInput, parallelize_mo
 from olmo_core.distributed.parallel.tensor_parallel import SequenceParallel
 from olmo_core.distributed.utils import get_local_tensor
 from olmo_core.doc_utils import beta_feature
+from olmo_core.nn.fla import FLAConfig
+from olmo_core.nn.mamba import MambaConfig
+from olmo_core.nn.xlstm import XLSTMConfig
 from olmo_core.ops import attach_auxiliary_loss
 
 from ..attention.base import SequenceMixerConfig
@@ -1115,9 +1115,7 @@ class MambaBlock(TransformerBlockBase):
         super().__init__(n_layers=n_layers)
         self.d_model = d_model
         self.block_idx = block_idx
-        self.mamba = mamba.build(
-            d_model, init_device=init_device
-        )
+        self.mamba = mamba.build(d_model, init_device=init_device)
         self.mamba_norm = layer_norm.build(d_model, init_device=init_device)
         if feed_forward is not None:
             self.feed_forward = feed_forward.build(d_model=d_model, init_device=init_device)
@@ -1160,7 +1158,9 @@ class MambaBlock(TransformerBlockBase):
         if wrapping_strategy == TransformerDataParallelWrappingStrategy.fine_grained:
             fsdp_mamba = cast(FSDPModule, fully_shard(self.mamba, mesh=dp_mesh, **fsdp_kwargs))
             if self.feed_forward is not None:
-                fsdp_mlp = cast(FSDPModule, fully_shard(self.feed_forward, mesh=dp_mesh, **fsdp_kwargs))
+                fsdp_mlp = cast(
+                    FSDPModule, fully_shard(self.feed_forward, mesh=dp_mesh, **fsdp_kwargs)
+                )
             else:
                 fsdp_mlp = None
             fsdp_root = cast(FSDPModule, fully_shard(self, mesh=dp_mesh, **fsdp_kwargs))
@@ -1189,9 +1189,7 @@ class XLSTMBlock(TransformerBlockBase):
         super().__init__(n_layers=n_layers)
         self.d_model = d_model
         self.block_idx = block_idx
-        self.xlstm = xlstm.build(
-            d_model, init_device=init_device
-        )
+        self.xlstm = xlstm.build(d_model, init_device=init_device)
         self.xlstm_norm = layer_norm.build(d_model, init_device=init_device)
         if feed_forward is not None:
             self.feed_forward = feed_forward.build(d_model=d_model, init_device=init_device)
@@ -1231,7 +1229,9 @@ class XLSTMBlock(TransformerBlockBase):
         if wrapping_strategy == TransformerDataParallelWrappingStrategy.fine_grained:
             fsdp_xlstm = cast(FSDPModule, fully_shard(self.xlstm, mesh=dp_mesh, **fsdp_kwargs))
             if self.feed_forward is not None:
-                fsdp_mlp = cast(FSDPModule, fully_shard(self.feed_forward, mesh=dp_mesh, **fsdp_kwargs))
+                fsdp_mlp = cast(
+                    FSDPModule, fully_shard(self.feed_forward, mesh=dp_mesh, **fsdp_kwargs)
+                )
             else:
                 fsdp_mlp = None
             fsdp_root = cast(FSDPModule, fully_shard(self, mesh=dp_mesh, **fsdp_kwargs))
@@ -1260,9 +1260,7 @@ class FLABlock(TransformerBlockBase):
         super().__init__(n_layers=n_layers)
         self.d_model = d_model
         self.block_idx = block_idx
-        self.fla = fla.build(
-            d_model, init_device=init_device
-        )
+        self.fla = fla.build(d_model, init_device=init_device)
         self.fla_norm = layer_norm.build(d_model, init_device=init_device)
         if feed_forward is not None:
             self.feed_forward = feed_forward.build(d_model=d_model, init_device=init_device)
@@ -1302,7 +1300,9 @@ class FLABlock(TransformerBlockBase):
         if wrapping_strategy == TransformerDataParallelWrappingStrategy.fine_grained:
             fsdp_fla = cast(FSDPModule, fully_shard(self.fla, mesh=dp_mesh, **fsdp_kwargs))
             if self.feed_forward is not None:
-                fsdp_mlp = cast(FSDPModule, fully_shard(self.feed_forward, mesh=dp_mesh, **fsdp_kwargs))
+                fsdp_mlp = cast(
+                    FSDPModule, fully_shard(self.feed_forward, mesh=dp_mesh, **fsdp_kwargs)
+                )
             else:
                 fsdp_mlp = None
             fsdp_root = cast(FSDPModule, fully_shard(self, mesh=dp_mesh, **fsdp_kwargs))
