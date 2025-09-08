@@ -66,7 +66,19 @@ fla = ["flash-linear-attention>=0.4.1"]
 torchao = ["torchao==0.15.0"]
 transformers = ["transformers<5.0"]
 wandb = ["wandb"]
-all = ["ai2-olmo-core[dev,beaker,comet,dion,eval,fla,torchao,transformers,wandb]"]
+mamba = [
+    "triton>=3.2.0",
+    "mamba_ssm @ git+https://github.com/state-spaces/mamba.git@a6a1dae6efbf804c9944a0c2282b437deb4886d8",
+    "causal_conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@e940ead2fd962c56854455017541384909ca669f",
+    "einops",
+    "optree",
+    "regex",
+]
+xlstm = [
+    "mlstm_kernels",
+    "xlstm",
+]
+all = ["ai2-olmo-core[dev,beaker,comet,dion,eval,fla,torchao,transformers,wandb,mamba,xlstm]"]
 
 [tool.setuptools]
 include-package-data = true
