@@ -433,6 +433,7 @@ class TransformerConfig(ModelConfig):
             )
         elif self.name == TransformerType.linear_rnn:
             # model = AutoModelForCausalLM.from_config(self.fla_config)
+            # FIXME: Implement an FLATransformer??? Or just do blockwise thing?
             model = self.fla_config.build()
         else:
             raise NotImplementedError(self.name)
