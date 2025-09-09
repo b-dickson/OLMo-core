@@ -4,16 +4,14 @@ from collections.abc import Callable
 from dataclasses import InitVar, dataclass, field
 from fnmatch import fnmatch
 from itertools import cycle, islice
-from typing import TYPE_CHECKING, Dict, List, Optional, cast
-
-from transformers import AutoModelForCausalLM
-from transformers.configuration_utils import PretrainedConfig
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from olmo_core.config import UNSET, DType, StrEnum
 from olmo_core.doc_utils import beta_feature
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.nn.attention.base import SequenceMixerConfig
 from olmo_core.nn.fla import FLAConfig
+from olmo_core.nn.fla.model import FLAModelConfig
 from olmo_core.utils import ensure_multiple_of
 
 from ..attention import (
@@ -346,7 +344,7 @@ class TransformerConfig(ModelConfig):
     block_pattern: Optional[List[str]] = None
     block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None
     embed_scale: Optional[float] = None
-    fla_config: Optional[PretrainedConfig] = None
+    fla_config: Optional[FLAModelConfig] = None
 
     def __post_init__(self):
         validate_block_resolution_config(
@@ -435,7 +433,8 @@ class TransformerConfig(ModelConfig):
                 block_pattern=self.block_pattern,
             )
         elif self.name == TransformerType.linear_rnn:
-            model = AutoModelForCausalLM.from_config(self.fla_config)
+            # model = AutoModelForCausalLM.from_config(self.fla_config)
+            model = self.fla_config.build()
         else:
             raise NotImplementedError(self.name)
 
@@ -1833,12 +1832,6 @@ class TransformerConfig(ModelConfig):
 
     @classmethod
     def fla(cls, fla_model_name: str, **kwargs) -> "TransformerConfig":
-        import fla.models
-        config_cls = getattr(fla.models, fla_model_name + "Config", None)
-        assert config_cls is not None, f"Unknown FLA model name: {fla_model_name}"
-        fla_config = config_cls(**kwargs)
-
-        # TODO: Change this config?
         return cls(
             d_model=0,
             vocab_size=0,
@@ -1847,7 +1840,7 @@ class TransformerConfig(ModelConfig):
             lm_head=LMHeadConfig(),
             dtype=DType.float32,
             block_overrides=None,
-            fla_config=fla_config,
+            fla_config=FLAModelConfig(fla_model_name=fla_model_name, kwargs=kwargs),
         )
 
 
