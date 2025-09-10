@@ -51,6 +51,7 @@ from ..moe import MoEBase
 from ..rope import RoPEBuffers, RotaryEmbeddingBase
 from ..utils import selective_checkpointing_context_fn
 from .block import (
+    FLABlock,
     MoETransformerBlock,
     NormalizedTransformerBlock,
     TransformerBlock,
@@ -289,21 +290,27 @@ class Transformer(nn.Module):
         for block in self.blocks.values():
             # This might fail if it's wrapped.
             #  assert isinstance(block, TransformerBlock)
-            block = cast(TransformerBlock, block)
-            att = cast(SequenceMixer, block.attention)
 
-            # Attention weights.
-            self.init_method.init_attention(
-                att,
-                d_model=self.d_model,
-                block_idx=block.block_idx,
-                num_blocks=self.n_layers,
-                std=self.init_std,
-                generator=generator,
-            )
+            if not isinstance(block, FLABlock):
+                block = cast(TransformerBlock, block)
+                att = cast(Union[Attention, FusedAttention], block.attention)
+            else:
+                block = cast(FLABlock, block)
+                att = None
+
+            if att is not None:
+                # Attention weights.
+                self.init_method.init_attention(
+                    att,
+                    d_model=self.d_model,
+                    block_idx=block.block_idx,
+                    num_blocks=self.n_layers,
+                    std=self.init_std,
+                    generator=generator,
+                )
 
             # Feed-forward weights.
-            if hasattr(block, "feed_forward"):
+            if hasattr(block, "feed_forward") and block.feed_forward is not None:
                 self.init_method.init_feed_forward(
                     block.feed_forward,
                     d_model=self.d_model,
@@ -327,7 +334,7 @@ class Transformer(nn.Module):
                     generator=generator,
                 )
 
-            if isinstance(att, (Attention, FusedAttention)):
+            if att is not None:
                 # Warm up attention backend cache.
                 if max_seq_len is not None and att.backend is not None:
                     att.backend.warmup_cache(max_seq_len, device)
