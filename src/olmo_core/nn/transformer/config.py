@@ -285,8 +285,10 @@ class TransformerBlockConfig(ModuleConfig):
                 # TODO: Abstract to allow custom interleaved block types
                 # TODO: Also abstract callback for different allocation strategies
                 if block_idx % 2 == 0:
+                    kwargs.pop("fla")
                     return ReorderedNormTransformerBlock(**kwargs)
                 else:
+                    kwargs.pop("attention")
                     return FLABlock(n_heads=n_heads, **kwargs)
             else:
                 raise NotImplementedError(self.name)
