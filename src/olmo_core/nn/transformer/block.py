@@ -291,6 +291,7 @@ class LayerNormScaledTransformerBlock(TransformerBlock):
         )
 
 
+
 class ReorderedNormTransformerBlock(TransformerBlock):
     """
     Like :class:`TransformerBlock` except that the attention norm is applied on the output
