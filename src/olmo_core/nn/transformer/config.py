@@ -195,6 +195,12 @@ class TransformerBlockConfig(ModuleConfig):
     The config for the MoE feed-forward layer. Required for MoE blocks.
     """
     fla: Optional[FLAConfig] = None
+    fla_hybrid_attention_indices: Optional[List[int]] = None
+    """
+    For fla_hybrid blocks, specifies which layer indices should use attention.
+    If None, defaults to alternating pattern (even indices use attention).
+    Can be a list of specific indices, e.g., [0, 2, 5, 7] or [0, -1] for first and last.
+    """
     name: TransformerBlockType = TransformerBlockType.default
     """
     The block type.
@@ -250,6 +256,7 @@ class TransformerBlockConfig(ModuleConfig):
 
         kwargs = self.as_dict(exclude_none=True, recurse=False)
         kwargs.pop("name")
+        kwargs.pop("fla_hybrid_attention_indices", None)
         kwargs.update(
             d_model=d_model,
             block_idx=block_idx,
@@ -284,7 +291,18 @@ class TransformerBlockConfig(ModuleConfig):
             elif self.name == TransformerBlockType.fla_hybrid:
                 # TODO: Abstract to allow custom interleaved block types
                 # TODO: Also abstract callback for different allocation strategies
-                if block_idx % 2 == 0:
+                if self.fla_hybrid_attention_indices is None:
+                    # Default: alternating pattern (even indices use attention)
+                    use_attention = block_idx % 2 == 0
+                else:
+                    # Support negative indices (e.g., -1 for last layer)
+                    normalized_indices = [
+                        idx if idx >= 0 else n_layers + idx 
+                        for idx in self.fla_hybrid_attention_indices
+                    ]
+                    use_attention = block_idx in normalized_indices
+                
+                if use_attention:
                     kwargs.pop("fla")
                     return ReorderedNormTransformerBlock(**kwargs)
                 else:
