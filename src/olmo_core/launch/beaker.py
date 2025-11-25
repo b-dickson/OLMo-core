@@ -622,6 +622,7 @@ class BeakerLaunchConfig(Config):
         if command[0].endswith(".py"):
             command = ["python"] + command
 
+<<<<<<< HEAD
         recipe = GantryRecipe(
             command,
             name=self.name,
