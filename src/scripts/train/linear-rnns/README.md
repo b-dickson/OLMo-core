@@ -22,6 +22,8 @@ python src/scripts/train/linear-rnns/OLMo3-7B-hybrid.py launch OLMo3-7B-hybrid a
 
 python src/scripts/train/linear-rnns/OLMo3.1-7B-hybrid.py launch OLMo3.1-7B-hybrid-6T-30h ai2/augusta --launch.priority="urgent" --launch.num_nodes=16
 
+python src/scripts/train/linear-rnns/OLMo3.1-7B-hybrid.py launch OLMo3.1-7B-6T-30h ai2/augusta --launch.priority="urgent" --launch.num_nodes=16
+
 while true; do
     python src/scripts/train/linear-rnns/OLMo3.1-7B-hybrid.py launch OLMo3.1-7B-6T-30h ai2/augusta \
         --launch.use_hostname_constraints=true \
