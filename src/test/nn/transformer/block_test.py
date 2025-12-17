@@ -71,9 +71,7 @@ def _run_tensor_parallel_block(
     device = get_default_device()
     mesh = init_device_mesh(device.type, (get_world_size(),), mesh_dim_names=("tp",))
 
-    block = _build_block(
-        block_cls, d_model=d_model, init_device=device.type, kwargs=kwargs
-    )
+    block = _build_block(block_cls, d_model=d_model, init_device=device.type, kwargs=kwargs)
 
     # Shard sequence dim in/out like the transformer model does.
     block.apply_tp(mesh["tp"], input_layout=Shard(1))
@@ -96,6 +94,7 @@ def _run_tensor_parallel_block(
 def _fla_available():
     try:
         import fla  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -106,7 +105,9 @@ def _fla_available():
     "block_cls,kwargs",
     [
         pytest.param(TransformerBlock, dict(n_heads=8), id="transformer-default"),
-        pytest.param(TransformerBlock, dict(n_heads=8, rope=None, bias=False), id="transformer-no-bias"),
+        pytest.param(
+            TransformerBlock, dict(n_heads=8, rope=None, bias=False), id="transformer-no-bias"
+        ),
         pytest.param(ReorderedNormTransformerBlock, dict(n_heads=8), id="reordered-norm"),
         pytest.param(PeriNormTransformerBlock, dict(n_heads=8), id="peri-norm"),
         pytest.param(
@@ -129,9 +130,7 @@ def test_tensor_parallel_block(
     if block_cls != FLABlock:
         kwargs = {**kwargs, "name": AttentionType.default, "use_flash": False}
 
-    block = _build_block(
-        block_cls, d_model=d_model, init_device=device.type, kwargs=kwargs
-    )
+    block = _build_block(block_cls, d_model=d_model, init_device=device.type, kwargs=kwargs)
 
     bs, seq_len = 2, 64
     x = torch.randn(bs, seq_len, d_model, device=device)
