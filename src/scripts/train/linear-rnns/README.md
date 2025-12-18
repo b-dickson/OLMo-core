@@ -46,14 +46,17 @@ It could also be the case that there are no hosts satisfying these constraints, 
 In either case, you can add `--launch.use_hostname_constraints=false` to disable hostname constraints (which means you won't need to authenticate).
 
 ```shell
-python src/scripts/train/linear-rnns/OLMo3.1-7B-hybrid.py launch OLMo3.1-7B-6T-30h ai2/augusta \
-    --launch.priority="urgent" \
-    --launch.num_nodes=64 \
-    --train_module.dp_config.name=hsdp \
-    --train_module.dp_config.shard_degree=128 \
-    --launch.beaker_image=tylerr/olmo-core-tch270cu128-2025-09-24 \
-    --model.block.attention.backend=flash_3 \
-    --launch.num_execution_units=4
+while true; do
+    python src/scripts/train/linear-rnns/OLMo3.1-7B-hybrid.py launch OLMo3.1-7B-6T-30h ai2/augusta \
+        --launch.priority="urgent" \
+        --launch.num_nodes=64 \
+        --train_module.dp_config.name=hsdp \
+        --train_module.dp_config.shard_degree=128 \
+        --launch.beaker_image=tylerr/olmo-core-tch270cu128-2025-09-24 \
+        --model.block.attention.backend=flash_3 \
+        --launch.use_hostname_constraints=false \
+        --launch.num_execution_units=4
+done
 ```
 
 If the run is consistently failing, you can launch it inside a while loop.
