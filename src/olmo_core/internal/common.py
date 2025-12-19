@@ -1,7 +1,7 @@
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from beaker import BeakerGpuType
@@ -69,6 +69,7 @@ def build_launch_config(
     num_execution_units: Optional[int] = None,
     step_timeout: Optional[int] = None,
     step_soft_timeout: Optional[int] = 10 * 60,
+    extra_env_vars: Optional[List[Tuple[str, str]]] = None,
 ) -> BeakerLaunchConfig:
     weka_buckets: List[BeakerWekaBucket] = []
 
@@ -128,6 +129,9 @@ def build_launch_config(
         env_vars.append(BeakerEnvVar(name="NCCL_DEBUG", value=nccl_debug))
     else:
         env_vars.append(BeakerEnvVar(name="NCCL_DEBUG", value="INFO" if nccl_debug else "WARN"))
+    if extra_env_vars:
+        for key, value in extra_env_vars:
+            env_vars.append(BeakerEnvVar(name=key, value=value))
     if flight_recorder:
         # https://github.com/pytorch/tutorials/blob/main/unstable_source/flight_recorder_tutorial.rst
         fr_dump_location = Path(BEAKER_RESULT_DIR) / "flightrecorder" / "nccl_trace_rank_"

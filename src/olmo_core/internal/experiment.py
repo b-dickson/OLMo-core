@@ -1,7 +1,7 @@
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, cast
+from typing import Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -185,6 +185,7 @@ def build_common_components(
     beaker_workspace: str = "ai2/OLMo-core",
     num_execution_units: Optional[int] = None,
     flight_recorder: bool = False,
+    extra_env_vars: Optional[List[Tuple[str, str]]] = None,
 ) -> CommonComponents:
     root_dir = get_root_dir(cli_context.cluster)
     beaker_user = get_beaker_username()
@@ -203,6 +204,7 @@ def build_common_components(
             num_nodes=num_nodes,
             workspace=beaker_workspace,
             num_execution_units=num_execution_units,
+            extra_env_vars=extra_env_vars,
         )
         launch_config.launch_timeout = 5 * 60
 
@@ -341,6 +343,7 @@ def build_config(
     flight_recorder: bool = False,
     num_execution_units: Optional[int] = None,
     include_default_evals: bool = False,
+    extra_env_vars: Optional[List[Tuple[str, str]]] = None,
     **data_kwargs,
 ) -> ExperimentConfig:
     """
@@ -385,6 +388,7 @@ def build_config(
         #  use_hostname_constraints=use_hostname_constraints,
         flight_recorder=flight_recorder,
         num_execution_units=num_execution_units,
+        extra_env_vars=extra_env_vars,
     )
 
     data = data_config_builder(common, **data_kwargs)
