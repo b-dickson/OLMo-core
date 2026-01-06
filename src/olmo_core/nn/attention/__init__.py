@@ -37,6 +37,13 @@ from .backend import (
     TEAttentionBackend,
     TorchAttentionBackend,
 )
+from .mla import (
+    IndexerConfig,
+    LightningIndexer,
+    MLAConfig,
+    MLAKVCacheManager,
+    MLAttention,
+)
 from .ring import (
     RingAttentionLlama3LoadBalancer,
     RingAttentionLoadBalancer,
@@ -60,6 +67,11 @@ __all__ = [
     "Attention",
     "FusedAttention",
     "NormalizedAttention",
+    "MLAConfig",
+    "IndexerConfig",
+    "MLAttention",
+    "MLAKVCacheManager",
+    "LightningIndexer",
     "RingAttentionLoadBalancerType",
     "RingAttentionLoadBalancer",
     "RingAttentionZigZagLoadBalancer",
@@ -159,6 +171,10 @@ class AttentionType(StrEnum):
     """
     ➡️ :class:`NormalizedAttention`
     """
+    mla = "mla"
+    """
+    ➡️ :class:`MLAttention` (Multi-head Latent Attention with optional sparse indexing)
+    """
 
 
 @dataclass
@@ -186,6 +202,14 @@ class AttentionConfig(ModuleConfig):
     dtype: DType = DType.float32
     sliding_window: Optional[SlidingWindowAttentionConfig] = None
     use_head_qk_norm: Optional[bool] = None
+    mla: Optional[MLAConfig] = None
+    """Configuration for Multi-head Latent Attention. Required when name='mla'."""
+    indexer: Optional[IndexerConfig] = None
+    """
+    Configuration for Lightning Indexer (sparse attention / DSA).
+    Can be used with both standard attention (name='default') and MLA (name='mla').
+    When enabled, uses top-k token selection for efficient sparse attention on long sequences.
+    """
 
     def num_params(self, d_model: int) -> int:
         """
@@ -279,10 +303,16 @@ class AttentionConfig(ModuleConfig):
             cache=cache,
         )
 
+        # Handle indexer config - rename to match parameter name in Attention class
+        indexer_cfg = kwargs.pop("indexer", None)
+        if indexer_cfg is not None:
+            kwargs["indexer_config"] = indexer_cfg
+
         try:
             if self.name == "default":
                 return Attention(**kwargs)
             elif self.name == "fused":
+                kwargs.pop("indexer_config", None)  # Fused attention doesn't support DSA yet
                 kwargs.pop("use_flash", None)
                 if "window_size" in kwargs:
                     raise OLMoConfigurationError(
@@ -290,11 +320,35 @@ class AttentionConfig(ModuleConfig):
                     )
                 return FusedAttention(**kwargs)
             elif self.name == "normalized":
+                kwargs.pop("indexer_config", None)  # Normalized attention doesn't support DSA yet
                 if "window_size" in kwargs:
                     raise OLMoConfigurationError(
                         "'window_size' is not supported with normalized attention"
                     )
                 return NormalizedAttention(**kwargs)
+            elif self.name == "mla":
+                # MLA requires mla config
+                mla_config = kwargs.pop("mla", None)
+                if mla_config is None:
+                    raise OLMoConfigurationError(
+                        "'mla' config is required when using AttentionType.mla"
+                    )
+                indexer_config = kwargs.pop("indexer_config", None)
+                # Remove unsupported options for MLA
+                kwargs.pop("use_flash", None)
+                kwargs.pop("gate", None)
+                kwargs.pop("rope", None)  # MLA handles RoPE internally
+                kwargs.pop("clip_qkv", None)
+                kwargs.pop("qk_norm", None)
+                kwargs.pop("window_size", None)
+                kwargs.pop("use_head_qk_norm", None)
+                kwargs.pop("n_kv_heads", None)  # MLA doesn't use separate kv_heads
+                kwargs.pop("cache", None)  # MLA manages its own cache
+                return MLAttention(
+                    mla_config=mla_config,
+                    indexer_config=indexer_config,
+                    **kwargs,
+                )
             else:
                 raise NotImplementedError(self.name)
         except TypeError as e:
@@ -380,9 +434,11 @@ class Attention(AttentionBase):
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
         use_head_qk_norm: bool = False,
+        indexer_config: Optional[IndexerConfig] = None,
     ):
         super().__init__()
 
+        self.d_model = d_model
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads
         self.head_dim = d_model // n_heads
@@ -480,6 +536,19 @@ class Attention(AttentionBase):
         )
         self.kv_cache_manager: Optional[KVCacheManager] = None
 
+        # Optional indexer for sparse attention (DSA)
+        self.indexer: Optional[LightningIndexer] = None
+        self.use_sparse_attention: bool = True
+        if indexer_config is not None and indexer_config.enabled:
+            self.indexer = LightningIndexer(
+                indexer_config,
+                q_input_dim=d_model,  # Project from input directly for standard attention
+                d_model=d_model,
+                rope_head_dim=0,  # Standard attention handles RoPE separately
+                dtype=dtype,
+                init_device=init_device,
+            )
+
     @property
     def cp_enabled(self) -> bool:
         return self.backend.cp_enabled
@@ -515,6 +584,69 @@ class Attention(AttentionBase):
         if self.kv_cache_manager is not None:
             self.kv_cache_manager.update_seqlen(q.shape[1])
         return att
+
+    def _sparse_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        top_k_indices: torch.Tensor,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Sparse attention using top-k selected indices.
+
+        Args:
+            q: Query tensor of shape (batch, seq_q, n_heads, head_dim)
+            k: Key tensor of shape (batch, seq_k, n_kv_heads, head_dim)
+            v: Value tensor of shape (batch, seq_k, n_kv_heads, head_dim)
+            top_k_indices: Selected indices of shape (batch, seq_q, top_k)
+            softmax_scale: Optional scale for softmax
+
+        Returns:
+            Attention output of shape (batch, seq_q, n_heads, head_dim)
+        """
+        import torch.nn.functional as F
+
+        bsz, seq_q, n_heads, head_dim = q.shape
+        _, seq_k, n_kv_heads, _ = k.shape
+
+        scale = softmax_scale if softmax_scale is not None else head_dim**-0.5
+
+        # Expand KV heads if using GQA/MQA
+        if n_kv_heads != n_heads:
+            n_rep = n_heads // n_kv_heads
+            k = k.unsqueeze(3).expand(-1, -1, -1, n_rep, -1).reshape(bsz, seq_k, n_heads, head_dim)
+            v = v.unsqueeze(3).expand(-1, -1, -1, n_rep, -1).reshape(bsz, seq_k, n_heads, head_dim)
+
+        # Gather selected keys and values
+        # top_k_indices: (bsz, seq_q, top_k)
+        k_indices = top_k_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n_heads, head_dim)
+        v_indices = top_k_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, n_heads, head_dim)
+
+        # Gather: (bsz, seq_q, top_k, n_heads, head_dim)
+        k_expanded = k.unsqueeze(1).expand(-1, seq_q, -1, -1, -1)
+        v_expanded = v.unsqueeze(1).expand(-1, seq_q, -1, -1, -1)
+
+        k_selected = torch.gather(k_expanded, 2, k_indices)
+        v_selected = torch.gather(v_expanded, 2, v_indices)
+
+        # Compute attention scores
+        # q: (bsz, seq_q, n_heads, head_dim) -> (bsz, seq_q, n_heads, 1, head_dim)
+        # k_selected: (bsz, seq_q, top_k, n_heads, head_dim) -> (bsz, seq_q, n_heads, top_k, head_dim)
+        q = q.unsqueeze(-2)  # (bsz, seq_q, n_heads, 1, head_dim)
+        k_selected = k_selected.transpose(2, 3)  # (bsz, seq_q, n_heads, top_k, head_dim)
+        v_selected = v_selected.transpose(2, 3)  # (bsz, seq_q, n_heads, top_k, head_dim)
+
+        scores = torch.einsum("bqhod,bqhkd->bqhok", q, k_selected).squeeze(-2) * scale
+        # scores: (bsz, seq_q, n_heads, top_k)
+
+        # Softmax over selected tokens
+        attn_weights = F.softmax(scores, dim=-1)
+
+        # Compute output
+        out = torch.einsum("bqhk,bqhkd->bqhd", attn_weights, v_selected)
+        return out
 
     def forward(
         self,
@@ -596,20 +728,35 @@ class Attention(AttentionBase):
                 freqs_cis=freqs_cis,
             )
 
-        # shape: (batch_size, seq_len, n_heads, head_dim)
-        att = self.sdpa(
-            q,
-            k,
-            v,
-            cu_doc_lens=cu_doc_lens,
-            cu_doc_lens_q=cu_doc_lens_q,
-            cu_doc_lens_k=cu_doc_lens_k,
-            max_doc_len=max_doc_len,
-            max_doc_len_q=max_doc_len_q,
-            max_doc_len_k=max_doc_len_k,
-            local_k_slice=local_k_slice,
-            cache_leftpad=cache_leftpad,
-        )
+        # Check if we should use sparse attention via indexer
+        top_k_indices = None
+        if self.indexer is not None and self.use_sparse_attention:
+            # Get top-k indices from the indexer
+            # For standard attention, we pass x as both input and query source
+            top_k_indices = self.indexer(x, x, freqs_cis=freqs_cis)
+
+        if top_k_indices is not None:
+            # Use sparse attention with selected tokens
+            # shape: (batch_size, seq_len, n_heads, head_dim)
+            att = self._sparse_attention(q, k, v, top_k_indices)
+            if self.kv_cache_manager is not None:
+                self.kv_cache_manager.update_seqlen(q.shape[1])
+        else:
+            # Use standard dense attention
+            # shape: (batch_size, seq_len, n_heads, head_dim)
+            att = self.sdpa(
+                q,
+                k,
+                v,
+                cu_doc_lens=cu_doc_lens,
+                cu_doc_lens_q=cu_doc_lens_q,
+                cu_doc_lens_k=cu_doc_lens_k,
+                max_doc_len=max_doc_len,
+                max_doc_len_q=max_doc_len_q,
+                max_doc_len_k=max_doc_len_k,
+                local_k_slice=local_k_slice,
+                cache_leftpad=cache_leftpad,
+            )
 
         if self.gate is not None:
             assert self.w_g is not None

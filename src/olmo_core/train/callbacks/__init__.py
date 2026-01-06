@@ -5,6 +5,13 @@ Trainer :class:`Callback` implementations.
 from .batch_size_scheduler import BatchSizeSchedulerCallback
 from .beaker import BeakerCallback
 from .callback import Callback, CallbackConfig
+from .dsa_training import (
+    DSATrainingCallback,
+    DSATrainingConfig,
+    DSATrainingStage,
+    compute_dense_alignment_loss,
+    compute_sparse_alignment_loss,
+)
 from .checkpointer import CheckpointerCallback, CheckpointRemovalStrategy
 from .comet import CometCallback, CometNotificationSetting
 from .config_saver import ConfigSaverCallback
@@ -35,6 +42,11 @@ __all__ = [
     "CometNotificationSetting",
     "ConfigSaverCallback",
     "ConsoleLoggerCallback",
+    "DSATrainingCallback",
+    "DSATrainingConfig",
+    "DSATrainingStage",
+    "compute_dense_alignment_loss",
+    "compute_sparse_alignment_loss",
     "EvaluatorCallback",
     "LMEvaluatorCallbackConfig",
     "DownstreamEvaluatorCallbackConfig",
