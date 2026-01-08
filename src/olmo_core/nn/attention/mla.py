@@ -23,21 +23,25 @@ from torch.distributed.tensor import Placement
 
 from olmo_core.config import Config
 
+from ..buffer_cache import BufferCache
 from ..layer_norm import RMSNorm
-from .backend import AttentionBackendName
+from ..rope import ComplexRotaryEmbedding, RoPEConfig
+from .backend import AttentionBackend
 from .ring import RingAttentionLoadBalancerType
 
 __all__ = [
     "MLAConfig",
     "IndexerConfig",
     "LightningIndexer",
+    "MLAAttentionBackend",
     "MLAKVCacheManager",
     "MLAttention",
 ]
 
 log = logging.getLogger(__name__)
 
-# Optional Hadamard transform import
+# Hadamard transform, Deepseek uses this, 
+# should improve DSA top-k selection quality ?
 try:
     from fast_hadamard_transform import hadamard_transform
 
@@ -45,21 +49,6 @@ try:
 except ImportError:
     HAS_HADAMARD = False
     hadamard_transform = None  # type: ignore
-
-# FP8 quantization from torchao
-try:
-    from torchao.quantization.quant_primitives import (
-        _choose_scale_float8,
-        _dequantize_affine_float8,
-        _quantize_affine_float8,
-    )
-
-    HAS_TORCHAO_FP8 = True
-except ImportError:
-    HAS_TORCHAO_FP8 = False
-    _choose_scale_float8 = None  # type: ignore
-    _quantize_affine_float8 = None  # type: ignore
-    _dequantize_affine_float8 = None  # type: ignore
 
 
 @dataclass
@@ -119,14 +108,73 @@ class IndexerConfig(Config):
     Requires fast-hadamard-transform library.
     """
 
-    use_fp8: bool = True
-    """Use FP8 quantization for indexer computation. Requires H100+ GPU."""
 
-    fp8_block_size: int = 128
-    """Block size for FP8 quantization."""
+class MLAAttentionBackend(AttentionBackend):
+    """
+    Attention backend for MLA with asymmetric head dimensions (qk_head_dim != v_head_dim).
+    """
 
-    fallback_seq_len: int = 4096
-    """Use dense attention for sequences shorter than this length."""
+    def __init__(
+        self,
+        *,
+        qk_head_dim: int,
+        v_head_dim: int,
+        n_heads: int,
+        scale: Optional[float] = None,
+        dropout_p: float = 0.0,
+        cache: Optional[BufferCache] = None,
+    ):
+        super().__init__(
+            head_dim=qk_head_dim,
+            n_heads=n_heads,
+            n_kv_heads=n_heads,
+            scale=scale,
+            dropout_p=dropout_p,
+            window_size=(-1, -1),
+            cache=cache,
+        )
+        self.qk_head_dim = qk_head_dim
+        self.v_head_dim = v_head_dim
+
+    @classmethod
+    def assert_supported(cls):
+        pass
+
+    @classmethod
+    def assert_supports_swa(cls):
+        raise RuntimeError(f"'{cls.__name__}' doesn't support sliding window attention")
+
+    @classmethod
+    def assert_supports_cp(cls):
+        raise RuntimeError(f"'{cls.__name__}' doesn't support context parallelism")
+
+    @classmethod
+    def assert_supports_packed_qkv(cls):
+        raise RuntimeError(f"'{cls.__name__}' doesn't support packed QKV")
+
+    @classmethod
+    def assert_supports_kv_cache(cls):
+        raise RuntimeError(f"'{cls.__name__}' doesn't support KV caching")
+
+    def forward(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        is_causal: bool = True,
+    ) -> Tensor:
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=is_causal,
+            scale=self.scale,
+        )
+
+        return out.transpose(1, 2)
 
 
 class LightningIndexer(nn.Module):
@@ -162,7 +210,6 @@ class LightningIndexer(nn.Module):
         super().__init__()
         self.config = config
         self.top_k = config.top_k
-        self.fallback_seq_len = config.fallback_seq_len
         self.head_dim = config.head_dim
         self.n_heads = config.n_heads
         self.rope_head_dim = rope_head_dim
@@ -172,17 +219,9 @@ class LightningIndexer(nn.Module):
         if config.use_hadamard and not HAS_HADAMARD:
             warnings.warn(
                 "use_hadamard=True but fast-hadamard-transform not installed. "
-                "Install with: pip install fast-hadamard-transform. "
+                "Install with: uv pip install fast-hadamard-transform. "
                 "Falling back to identity transform."
             )
-
-        self.use_fp8 = config.use_fp8 and HAS_TORCHAO_FP8
-        if config.use_fp8 and not HAS_TORCHAO_FP8:
-            warnings.warn(
-                "use_fp8=True but torchao FP8 primitives not available. "
-                "Falling back to standard precision."
-            )
-        self.fp8_block_size = config.fp8_block_size
 
         # Query projection
         # For MLA: projects from q_lora_rank (compressed queries)
@@ -221,31 +260,13 @@ class LightningIndexer(nn.Module):
 
         self.softmax_scale = config.head_dim**-0.5
 
-    def _quantize_to_fp8(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        """Quantize tensor to FP8 using torchao primitives."""
-        assert _choose_scale_float8 is not None
-        assert _quantize_affine_float8 is not None
-
-        # Calculate per-block scales
-        scale = _choose_scale_float8(
-            x,
-            block_size=[self.fp8_block_size],
-            float8_dtype=torch.float8_e4m3fn,
-        )
-        # Quantize to FP8
-        x_fp8 = _quantize_affine_float8(x, scale, torch.float8_e4m3fn)
-        return x_fp8, scale
-
     def forward(
         self,
         x: Tensor,
         q_input: Tensor,
         freqs_cis: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
-        k_cache: Optional[Tensor] = None,
-        k_scale_cache: Optional[Tensor] = None,
-        start_pos: int = 0,
-    ) -> Optional[Tensor]:
+    ) -> Tensor:
         """
         Compute top-k indices for sparse attention.
 
@@ -256,20 +277,11 @@ class LightningIndexer(nn.Module):
                 this should be the input x of shape (batch_size, seq_len, d_model).
             freqs_cis: Precomputed rotary embedding frequencies
             mask: Optional causal mask
-            k_cache: Optional FP8 key cache for decode phase
-            k_scale_cache: Optional scale cache for FP8 keys
-            start_pos: Starting position for caching
 
         Returns:
-            Tensor of shape (batch_size, seq_len, top_k) containing selected indices,
-            or None if falling back to dense attention.
+            Tensor of shape (batch_size, seq_len, top_k) containing selected indices.
         """
         bsz, seq_len, _ = x.shape
-        end_pos = start_pos + seq_len
-
-        # Fall back to dense attention for short sequences
-        if end_pos <= self.fallback_seq_len:
-            return None
 
         # Compute index queries
         q = self.w_q(q_input)  # (bsz, seq, n_heads * head_dim)
@@ -304,24 +316,6 @@ class LightningIndexer(nn.Module):
             q = hadamard_transform(q.contiguous(), scale=self.head_dim**-0.5)
             k = hadamard_transform(k.contiguous(), scale=self.head_dim**-0.5)
 
-        # FP8 quantization
-        if self.use_fp8:
-            assert _dequantize_affine_float8 is not None
-            q_fp8, q_scale = self._quantize_to_fp8(q)
-            k_fp8, k_scale = self._quantize_to_fp8(k)
-
-            # Update cache if provided (for decode phase)
-            if k_cache is not None:
-                k_cache[:bsz, start_pos:end_pos] = k_fp8
-                k_scale_cache[:bsz, start_pos:end_pos] = k_scale
-                # Use full cached keys
-                k_fp8 = k_cache[:bsz, :end_pos]
-                k_scale = k_scale_cache[:bsz, :end_pos]
-
-            # Dequantize for matmul
-            q = _dequantize_affine_float8(q_fp8, q_scale, x.dtype)
-            k = _dequantize_affine_float8(k_fp8, k_scale, x.dtype)
-
         # Compute scores: (bsz, seq_q, n_heads, seq_k)
         scores = torch.einsum("bqhd,bkd->bqhk", q, k) * self.softmax_scale
 
@@ -334,7 +328,7 @@ class LightningIndexer(nn.Module):
             scores = scores + mask
 
         # Select top-k indices
-        top_k_indices = scores.topk(min(self.top_k, end_pos), dim=-1).indices
+        top_k_indices = scores.topk(min(self.top_k, seq_len), dim=-1).indices
 
         return top_k_indices
 
@@ -385,12 +379,6 @@ class MLAKVCacheManager(nn.Module):
             torch.zeros(batch_size, max_seq_len, rope_head_dim, dtype=dtype, device=device),
             persistent=False,
         )
-        # Track current sequence length
-        self.register_buffer(
-            "cache_seqlens",
-            torch.zeros(1, dtype=torch.int32, device=device),
-            persistent=False,
-        )
 
     def update(self, kv_latent: Tensor, k_rope: Tensor, start_pos: int) -> None:
         """Update cache with new latent and RoPE values."""
@@ -399,7 +387,6 @@ class MLAKVCacheManager(nn.Module):
 
         self.kv_cache[:bsz, start_pos:end_pos] = kv_latent
         self.rope_cache[:bsz, start_pos:end_pos] = k_rope
-        self.cache_seqlens.fill_(end_pos)
 
     def get_cached(self, bsz: int, end_pos: int) -> Tuple[Tensor, Tensor]:
         """Retrieve cached latent and RoPE values."""
@@ -423,11 +410,6 @@ class MLAKVCacheManager(nn.Module):
 
         self.kv_cache.zero_()
         self.rope_cache.zero_()
-        self.cache_seqlens.zero_()
-
-    def current_position(self) -> int:
-        """Return current cache position."""
-        return int(self.cache_seqlens.item())
 
 
 class MLAttention(nn.Module):
@@ -447,6 +429,8 @@ class MLAttention(nn.Module):
     :param n_heads: The number of attention heads.
     :param mla_config: Configuration for MLA compression.
     :param indexer_config: Optional configuration for sparse attention.
+    :param rope: The config for RoPE, if RoPE should be used.
+    :param cache: Buffer cache for RoPE.
     :param bias: Include biases with linear layers.
     :param dropout: Dropout probability.
     :param dtype: The default data type to use for parameters.
@@ -460,10 +444,11 @@ class MLAttention(nn.Module):
         n_heads: int,
         mla_config: MLAConfig,
         indexer_config: Optional[IndexerConfig] = None,
+        rope: Optional[RoPEConfig] = None,
+        cache: Optional[BufferCache] = None,
         bias: bool = False,
         dropout: float = 0.0,
         softmax_scale: Optional[float] = None,
-        backend: Optional[AttentionBackendName] = None,
         dtype: torch.dtype = torch.float32,
         init_device: str = "cpu",
     ):
@@ -538,12 +523,29 @@ class MLAttention(nn.Module):
         # KV cache manager (initialized lazily)
         self.kv_cache_manager: Optional[MLAKVCacheManager] = None
 
-        # Backend for attention computation
-        self.backend_name = backend
+        # RoPE module for positional embeddings
+        # MLA uses ComplexRotaryEmbedding for the rope portion of Q and K
+        self.rope: Optional[ComplexRotaryEmbedding] = None
+        if rope is not None:
+            rope_module = rope.build(self.qk_rope_head_dim, cache=cache)
+            assert isinstance(rope_module, ComplexRotaryEmbedding), (
+                f"MLA requires ComplexRotaryEmbedding (rope.name='complex'), got {type(rope_module)}"
+            )
+            self.rope = rope_module
 
         # Control whether to use sparse attention (can be toggled for DSA training)
         # If False, always uses dense attention even if indexer is present
         self.use_sparse_attention: bool = True
+
+        # Attention backend for dense attention
+        self.backend = MLAAttentionBackend(
+            qk_head_dim=self.qk_head_dim,
+            v_head_dim=self.v_head_dim,
+            n_heads=n_heads,
+            scale=self.softmax_scale,
+            dropout_p=dropout,
+            cache=cache,
+        )
 
     def init_kv_cache_manager(
         self,
@@ -570,7 +572,6 @@ class MLAttention(nn.Module):
     def forward(
         self,
         x: Tensor,
-        freqs_cis: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         start_pos: int = 0,
     ) -> Tensor:
@@ -579,7 +580,6 @@ class MLAttention(nn.Module):
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, d_model)
-            freqs_cis: Precomputed rotary embedding frequencies
             mask: Optional attention mask
             start_pos: Starting position for caching (used in inference)
 
@@ -588,6 +588,14 @@ class MLAttention(nn.Module):
         """
         bsz, seq_len, _ = x.shape
         end_pos = start_pos + seq_len
+
+        # Get RoPE frequencies from the rope module
+        freqs_cis: Optional[Tensor] = None
+        if self.rope is not None:
+            rope_buffers = self.rope.get_buffers(end_pos, x.device)
+            freqs_cis = rope_buffers.freqs_cis
+            if freqs_cis is not None:
+                freqs_cis = freqs_cis[start_pos:end_pos]
 
         # Query projection (low-rank)
         if self.w_q_down is not None:
@@ -638,9 +646,11 @@ class MLAttention(nn.Module):
 
         # Compute attention (sparse or dense)
         if top_k_indices is not None:
-            att = self._sparse_attention(q, k, v, top_k_indices, mask)
+            att = self._sparse_attention(q, k, v, top_k_indices)
         else:
-            att = self._dense_attention(q, k, v, mask)
+            # Use causal attention for autoregressive decoding
+            is_causal = mask is None  # If no explicit mask, assume causal
+            att = self._dense_attention(q, k, v, is_causal=is_causal)
 
         # Output projection
         return self.w_out(att.flatten(2))
@@ -650,28 +660,9 @@ class MLAttention(nn.Module):
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        mask: Optional[Tensor] = None,
+        is_causal: bool = False,
     ) -> Tensor:
-        """Standard dense attention computation."""
-        # q: (bsz, seq_q, n_heads, head_dim)
-        # k: (bsz, seq_k, n_heads, head_dim)
-        # v: (bsz, seq_k, n_heads, v_head_dim)
-
-        # Compute attention scores
-        scores = torch.einsum("bqhd,bkhd->bhqk", q, k) * self.softmax_scale
-
-        # Apply mask
-        if mask is not None:
-            scores = scores + mask
-
-        # Softmax and dropout
-        attn_weights = F.softmax(scores, dim=-1)
-        if self.dropout > 0 and self.training:
-            attn_weights = F.dropout(attn_weights, p=self.dropout)
-
-        # Compute output
-        out = torch.einsum("bhqk,bkhd->bqhd", attn_weights, v)
-        return out
+        return self.backend(q, k, v, is_causal=is_causal)
 
     def _sparse_attention(
         self,
@@ -679,7 +670,6 @@ class MLAttention(nn.Module):
         k: Tensor,
         v: Tensor,
         top_k_indices: Tensor,
-        mask: Optional[Tensor] = None,
     ) -> Tensor:
         """Sparse attention using top-k selected indices."""
         bsz, seq_q, n_heads, head_dim = q.shape
@@ -748,6 +738,7 @@ class MLAttention(nn.Module):
         raise NotImplementedError("Context parallelism not yet implemented for MLAttention")
 
     def num_flops_per_token(self, seq_len: int) -> int:
+        # TODO: make sure this is accurate
         """Calculate FLOPs per token for this attention layer."""
         # Query projection
         if self.q_lora_rank > 0:
