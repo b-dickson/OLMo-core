@@ -45,7 +45,6 @@ class TestMLAKVCacheManager:
 
         assert cache.kv_cache.shape == (batch_size, max_seq_len, kv_lora_rank)
         assert cache.rope_cache.shape == (batch_size, max_seq_len, rope_head_dim)
-        assert cache.current_position() == 0
 
     @pytest.mark.parametrize("device", DEVICES)
     def test_update_and_get(self, device: torch.device):
@@ -72,9 +71,6 @@ class TestMLAKVCacheManager:
         # Update cache
         cache.update(kv_latent, k_rope, start_pos=0)
 
-        # Check position updated
-        assert cache.current_position() == seq_len
-
         # Retrieve and verify
         cached_kv, cached_rope = cache.get_cached(batch_size, seq_len)
         assert torch.allclose(cached_kv, kv_latent)
@@ -93,12 +89,10 @@ class TestMLAKVCacheManager:
 
         # Fill with data
         cache.kv_cache.fill_(1.0)
-        cache.cache_seqlens.fill_(100)
 
         # Reset
         cache.reset()
 
-        assert cache.current_position() == 0
         assert cache.kv_cache.sum() == 0
 
 
@@ -294,14 +288,12 @@ class TestMLAttention:
         y = mla(x, start_pos=0)
 
         assert y.shape == x.shape
-        assert mla.kv_cache_manager.current_position() == prompt_len
 
         # Generate single token
         x_next = torch.randn(batch_size, 1, d_model, device=device)
         y_next = mla(x_next, start_pos=prompt_len)
 
         assert y_next.shape == (batch_size, 1, d_model)
-        assert mla.kv_cache_manager.current_position() == prompt_len + 1
 
 
 class TestLightningIndexer:
@@ -314,14 +306,12 @@ class TestLightningIndexer:
             n_heads=32,
             head_dim=64,
             top_k=64,
-            use_hadamard=False,  # Skip for basic test
-            use_fp8=False,
-            fallback_seq_len=16,
+            use_hadamard=False,
         )
 
         indexer = LightningIndexer(
             config=config,
-            q_input_dim=128,  # Changed from q_lora_rank
+            q_input_dim=128,
             d_model=256,
             rope_head_dim=16,
             init_device=str(device),
@@ -330,33 +320,6 @@ class TestLightningIndexer:
         assert indexer.top_k == 64
         assert indexer.n_heads == 32
         assert indexer.head_dim == 64
-
-    @pytest.mark.parametrize("device", DEVICES)
-    def test_fallback_to_dense(self, device: torch.device):
-        """Test that indexer returns None for short sequences."""
-        config = IndexerConfig(
-            n_heads=16,
-            head_dim=32,
-            top_k=32,
-            use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,  # Fallback for seq < 64
-        )
-
-        indexer = LightningIndexer(
-            config=config,
-            q_input_dim=64,  # Changed from q_lora_rank
-            d_model=128,
-            rope_head_dim=16,
-            init_device=str(device),
-        ).to(device)
-
-        # Short sequence should return None
-        x = torch.randn(2, 32, 128, device=device)  # seq_len=32 < fallback=64
-        q_input = torch.randn(2, 32, 64, device=device)  # Changed from q_compressed
-
-        indices = indexer(x, q_input)
-        assert indices is None
 
     @pytest.mark.parametrize("device", DEVICES)
     def test_top_k_selection(self, device: torch.device):
@@ -368,23 +331,21 @@ class TestLightningIndexer:
             head_dim=32,
             top_k=16,
             use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=8,  # Low threshold for testing
         )
 
         indexer = LightningIndexer(
             config=config,
-            q_input_dim=64,  # Changed from q_lora_rank
+            q_input_dim=64,
             d_model=128,
             rope_head_dim=16,
             init_device=str(device),
         ).to(device)
 
         batch_size = 2
-        seq_len = 32  # > fallback_seq_len
+        seq_len = 32
 
         x = torch.randn(batch_size, seq_len, 128, device=device)
-        q_input = torch.randn(batch_size, seq_len, 64, device=device)  # Changed from q_compressed
+        q_input = torch.randn(batch_size, seq_len, 64, device=device)
 
         indices = indexer(x, q_input)
 
@@ -431,7 +392,6 @@ class TestAttentionConfigMLA:
                 enabled=True,
                 top_k=64,
                 use_hadamard=False,
-                use_fp8=False,
             ),
         )
 
@@ -464,7 +424,7 @@ class TestMLAWithSparseAttention:
         d_model = 256
         n_heads = 4
         batch_size = 2
-        seq_len = 128  # Longer than fallback
+        seq_len = 128
 
         mla_config = MLAConfig(
             q_lora_rank=128,
@@ -480,8 +440,6 @@ class TestMLAWithSparseAttention:
             head_dim=32,
             top_k=32,
             use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,  # Will use sparse for seq_len=128
         )
 
         mla = MLAttention(
@@ -494,14 +452,14 @@ class TestMLAWithSparseAttention:
 
         x = torch.randn(batch_size, seq_len, d_model, device=device)
 
-        # Forward pass (should use sparse attention)
+        # Forward pass with sparse attention
         y = mla(x)
 
         assert y.shape == x.shape
 
     @pytest.mark.parametrize("device", DEVICES)
-    def test_sparse_vs_dense_fallback(self, device: torch.device):
-        """Test that short sequences use dense attention."""
+    def test_toggle_sparse_attention(self, device: torch.device):
+        """Test toggling sparse attention on/off at runtime."""
         seed_all(42)
 
         d_model = 256
@@ -522,8 +480,6 @@ class TestMLAWithSparseAttention:
             head_dim=32,
             top_k=32,
             use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,
         )
 
         mla = MLAttention(
@@ -534,15 +490,19 @@ class TestMLAWithSparseAttention:
             init_device=str(device),
         ).to(device)
 
-        # Short sequence - should use dense attention
-        x_short = torch.randn(batch_size, 32, d_model, device=device)
-        y_short = mla(x_short)
-        assert y_short.shape == x_short.shape
+        x = torch.randn(batch_size, 64, d_model, device=device)
 
-        # Long sequence - should use sparse attention
-        x_long = torch.randn(batch_size, 128, d_model, device=device)
-        y_long = mla(x_long)
-        assert y_long.shape == x_long.shape
+        # With sparse attention enabled (default)
+        assert mla.use_sparse_attention is True
+        y_sparse = mla(x)
+
+        # Disable sparse attention
+        mla.use_sparse_attention = False
+        y_dense = mla(x)
+
+        # Both should produce valid outputs
+        assert y_sparse.shape == x.shape
+        assert y_dense.shape == x.shape
 
 
 class TestMLANumFlops:
@@ -594,8 +554,6 @@ class TestStandardAttentionWithDSA:
             head_dim=32,
             top_k=32,
             use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,
         )
 
         attn = Attention(
@@ -612,7 +570,7 @@ class TestStandardAttentionWithDSA:
 
     @pytest.mark.parametrize("device", DEVICES)
     def test_attention_sparse_forward(self, device: torch.device):
-        """Test standard Attention forward with sparse attention (long sequences)."""
+        """Test standard Attention forward with sparse attention."""
         from olmo_core.nn.attention import Attention
 
         seed_all(42)
@@ -620,7 +578,7 @@ class TestStandardAttentionWithDSA:
         d_model = 256
         n_heads = 8
         batch_size = 2
-        seq_len = 128  # Longer than fallback_seq_len
+        seq_len = 128
 
         indexer_config = IndexerConfig(
             enabled=True,
@@ -628,42 +586,6 @@ class TestStandardAttentionWithDSA:
             head_dim=32,
             top_k=32,
             use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,  # seq_len=128 > 64, so sparse will be used
-        )
-
-        attn = Attention(
-            d_model=d_model,
-            n_heads=n_heads,
-            indexer_config=indexer_config,
-            init_device=str(device),
-        ).to(device)
-
-        x = torch.randn(batch_size, seq_len, d_model, device=device)
-        y = attn(x)
-
-        assert y.shape == x.shape
-
-    @pytest.mark.parametrize("device", DEVICES)
-    def test_attention_dense_fallback(self, device: torch.device):
-        """Test standard Attention falls back to dense for short sequences."""
-        from olmo_core.nn.attention import Attention
-
-        seed_all(42)
-
-        d_model = 256
-        n_heads = 8
-        batch_size = 2
-        seq_len = 32  # Shorter than fallback_seq_len
-
-        indexer_config = IndexerConfig(
-            enabled=True,
-            n_heads=16,
-            head_dim=32,
-            top_k=32,
-            use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,  # seq_len=32 < 64, so dense will be used
         )
 
         attn = Attention(
@@ -703,8 +625,6 @@ class TestStandardAttentionWithDSA:
             head_dim=32,
             top_k=32,
             use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,
         )
 
         attn = Attention(
@@ -742,7 +662,6 @@ class TestStandardAttentionWithDSA:
                 enabled=True,
                 top_k=32,
                 use_hadamard=False,
-                use_fp8=False,
             ),
         )
 
@@ -767,8 +686,6 @@ class TestStandardAttentionWithDSA:
             head_dim=32,
             top_k=32,
             use_hadamard=False,
-            use_fp8=False,
-            fallback_seq_len=64,
         )
 
         attn = Attention(
