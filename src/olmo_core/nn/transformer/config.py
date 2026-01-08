@@ -13,6 +13,8 @@ from ..attention import (
     AttentionBackendName,
     AttentionConfig,
     AttentionType,
+    IndexerConfig,
+    MLAConfig,
     SlidingWindowAttentionConfig,
 )
 from ..buffer_cache import BufferCache
@@ -876,6 +878,64 @@ class TransformerConfig(ModelConfig):
                 lb_loss_weight=0.01,
                 z_loss_weight=0.001,
             ),
+        )
+
+    @classmethod
+    def mla_small(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        """
+        A small MLA (Multi-head Latent Attention)
+        """
+        d_model = kwargs.pop("d_model", 512)
+        n_heads = kwargs.pop("n_heads", 8)
+        n_layers = kwargs.pop("n_layers", 6)
+
+        mla_config = MLAConfig(
+            q_lora_rank=kwargs.pop("q_lora_rank", d_model // 2),
+            kv_lora_rank=kwargs.pop("kv_lora_rank", d_model // 4),
+            qk_nope_head_dim=kwargs.pop("qk_nope_head_dim", 48),
+            qk_rope_head_dim=kwargs.pop("qk_rope_head_dim", 16),
+            v_head_dim=kwargs.pop("v_head_dim", 64),
+        )
+
+        indexer_config = None
+        if kwargs.pop("use_dsa", False):
+            indexer_config = IndexerConfig(
+                enabled=True,
+                n_heads=kwargs.pop("dsa_n_heads", 16),
+                head_dim=kwargs.pop("dsa_head_dim", 32),
+                top_k=kwargs.pop("dsa_top_k", 64),
+                use_hadamard=kwargs.pop("use_hadamard", False),
+            )
+
+        layer_norm = LayerNormConfig(
+            name=LayerNormType.rms,
+            eps=1e-6,
+            bias=False,
+        )
+
+        block = TransformerBlockConfig(
+            name=TransformerBlockType.reordered_norm,
+            attention=AttentionConfig(
+                name=AttentionType.mla,
+                n_heads=n_heads,
+                bias=False,
+                mla=mla_config,
+                indexer=indexer_config,
+            ),
+            feed_forward=FeedForwardConfig(
+                hidden_size=int(d_model * 4),
+                bias=False,
+            ),
+            layer_norm=layer_norm,
+        )
+
+        return cls(
+            d_model=d_model,
+            vocab_size=vocab_size,
+            n_layers=n_layers,
+            block=block,
+            lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False),
+            **kwargs,
         )
 
     @classmethod

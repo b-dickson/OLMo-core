@@ -7,7 +7,7 @@ from torch.distributed.tensor import DTensor
 from olmo_core.config import StrEnum
 from olmo_core.distributed.utils import distribute_like, get_local_tensor
 
-from ..attention import Attention, AttentionBase, FusedAttention
+from ..attention import Attention, AttentionBase, FusedAttention, MLAttention
 from ..feed_forward import FeedForward
 from ..moe import DroplessMoEMLP, MoEBase, MoELinearRouter, MoEMLP
 
@@ -114,7 +114,14 @@ class InitMethod(StrEnum):
             std = d_model**-0.5
 
         # NOTE: isinstance checks could fail with AC wrappers
-        if isinstance(m, Attention) or hasattr(m, "w_q"):
+        if isinstance(m, MLAttention) or hasattr(m, "w_kv_down"):
+            m = cast(MLAttention, m)
+            if m.w_q_down is not None:
+                self._init_linear(m.w_q_down, std=std, generator=generator)
+            self._init_linear(m.w_q_up, std=std, generator=generator)
+            self._init_linear(m.w_kv_down, std=std, generator=generator)
+            self._init_linear(m.w_kv_up, std=std, generator=generator)
+        elif isinstance(m, Attention) or hasattr(m, "w_q"):
             m = cast(Attention, m)
             for w in (m.w_q, m.w_k, m.w_v):
                 self._init_linear(w, std=std, generator=generator)
