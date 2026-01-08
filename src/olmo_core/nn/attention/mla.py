@@ -8,6 +8,7 @@ MLA compresses the KV cache using low-rank projections, reducing memory by ~93%
 while maintaining or improving performance. DSA (via the Lightning Indexer) further
 improves efficiency by selecting only the top-k most relevant tokens for attention.
 """
+# TODO add FP8 support (DeepSeek stores the low rank kv as fp8 for more efficiency)
 
 import logging
 import warnings
@@ -204,6 +205,7 @@ class LightningIndexer(nn.Module):
         d_model: int,
         rope_head_dim: int = 0,
         *,
+        rope: Optional[ComplexRotaryEmbedding] = None,
         dtype: torch.dtype = torch.float32,
         init_device: str = "cpu",
     ):
@@ -213,6 +215,7 @@ class LightningIndexer(nn.Module):
         self.head_dim = config.head_dim
         self.n_heads = config.n_heads
         self.rope_head_dim = rope_head_dim
+        self.rope = rope
 
         # Check for optional dependencies
         self.use_hadamard = config.use_hadamard and HAS_HADAMARD
@@ -283,31 +286,27 @@ class LightningIndexer(nn.Module):
         """
         bsz, seq_len, _ = x.shape
 
-        # Compute index queries
-        q = self.w_q(q_input)  # (bsz, seq, n_heads * head_dim)
-        q = q.view(bsz, seq_len, self.n_heads, self.head_dim)
-
-        # Split into RoPE and non-RoPE components (like DeepSeek reference)
+        # Compute index queries and split into RoPE and non-RoPE components
+        q = self.w_q(q_input).view(bsz, seq_len, self.n_heads, self.head_dim)
         q_rope = q[..., : self.rope_head_dim]
         q_nope = q[..., self.rope_head_dim :]
 
-        # Apply RoPE to positional component
-        if freqs_cis is not None:
-            q_rope = self._apply_rotary_emb(q_rope, freqs_cis)
-
-        q = torch.cat([q_rope, q_nope], dim=-1)
-
-        # Compute index keys
-        k = self.w_k(x)  # (bsz, seq, head_dim)
-        k = self.k_norm(k)
-
-        # Split and apply RoPE to keys
+        # Compute index keys and split
+        k = self.k_norm(self.w_k(x))
         k_rope = k[..., : self.rope_head_dim]
         k_nope = k[..., self.rope_head_dim :]
 
-        if freqs_cis is not None:
-            k_rope = self._apply_rotary_emb(k_rope.unsqueeze(2), freqs_cis).squeeze(2)
+        # Apply RoPE to positional components
+        if self.rope is not None:
+            q_rope, k_rope = self.rope(
+                q_rope,
+                k_rope.unsqueeze(2),  # Add head dim: (bsz, seq, 1, rope_dim)
+                head_first=False,
+                freqs_cis=freqs_cis,
+            )
+            k_rope = k_rope.squeeze(2)  # Remove head dim: (bsz, seq, rope_dim)
 
+        q = torch.cat([q_rope, q_nope], dim=-1)
         k = torch.cat([k_rope, k_nope], dim=-1)
 
         # Apply Hadamard transform if enabled
@@ -331,16 +330,6 @@ class LightningIndexer(nn.Module):
         top_k_indices = scores.topk(min(self.top_k, seq_len), dim=-1).indices
 
         return top_k_indices
-
-    def _apply_rotary_emb(self, x: Tensor, freqs_cis: Tensor) -> Tensor:
-        """Apply rotary positional embeddings."""
-        # This is a simplified version - the actual implementation should match
-        # the RoPE implementation used in the main attention module
-        dtype = x.dtype
-        x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-        freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-        y = torch.view_as_real(x * freqs_cis).flatten(-2)
-        return y.to(dtype)
 
 
 class MLAKVCacheManager(nn.Module):
@@ -506,6 +495,15 @@ class MLAttention(nn.Module):
         # Output projection
         self.w_out = nn.Linear(n_heads * self.v_head_dim, d_model, bias=bias, dtype=dtype, device=init_device)
 
+        # RoPE module for positional embeddings
+        self.rope: Optional[ComplexRotaryEmbedding] = None
+        if rope is not None:
+            rope_module = rope.build(self.qk_rope_head_dim, cache=cache)
+            assert isinstance(rope_module, ComplexRotaryEmbedding), (
+                f"MLA requires ComplexRotaryEmbedding (rope.name='complex'), got {type(rope_module)}"
+            )
+            self.rope = rope_module
+
         # Optional indexer for sparse attention
         if indexer_config is not None and indexer_config.enabled:
             q_input_dim = self.q_lora_rank if self.q_lora_rank > 0 else d_model
@@ -514,6 +512,7 @@ class MLAttention(nn.Module):
                 q_input_dim=q_input_dim,
                 d_model=d_model,
                 rope_head_dim=self.qk_rope_head_dim,
+                rope=self.rope,
                 dtype=dtype,
                 init_device=init_device,
             )
@@ -522,16 +521,6 @@ class MLAttention(nn.Module):
 
         # KV cache manager (initialized lazily)
         self.kv_cache_manager: Optional[MLAKVCacheManager] = None
-
-        # RoPE module for positional embeddings
-        # MLA uses ComplexRotaryEmbedding for the rope portion of Q and K
-        self.rope: Optional[ComplexRotaryEmbedding] = None
-        if rope is not None:
-            rope_module = rope.build(self.qk_rope_head_dim, cache=cache)
-            assert isinstance(rope_module, ComplexRotaryEmbedding), (
-                f"MLA requires ComplexRotaryEmbedding (rope.name='complex'), got {type(rope_module)}"
-            )
-            self.rope = rope_module
 
         # Control whether to use sparse attention (can be toggled for DSA training)
         # If False, always uses dense attention even if indexer is present
@@ -611,20 +600,22 @@ class MLAttention(nn.Module):
         # Split query into non-positional and positional components
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        # Apply RoPE to positional component
-        if freqs_cis is not None:
-            q_rope = self._apply_rotary_emb(q_rope, freqs_cis)
-
-        q = torch.cat([q_nope, q_rope], dim=-1)
-
         # KV projection (low-rank)
         kv = self.w_kv_down(x)
         kv_latent, k_rope = kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_latent = self.kv_norm(kv_latent)
 
-        # Apply RoPE to key positional component
-        if freqs_cis is not None:
-            k_rope = self._apply_rotary_emb(k_rope.unsqueeze(2), freqs_cis).squeeze(2)
+        # Apply RoPE to positional components of Q and K together
+        if self.rope is not None:
+            q_rope, k_rope = self.rope(
+                q_rope,
+                k_rope.unsqueeze(2),  # Add head dim: (bsz, seq, 1, rope_dim)
+                head_first=False,
+                freqs_cis=freqs_cis,
+            )
+            k_rope = k_rope.squeeze(2)  # Remove head dim: (bsz, seq, rope_dim)
+
+        q = torch.cat([q_nope, q_rope], dim=-1)
 
         # Update cache with compressed representation
         if self.kv_cache_manager is not None:
@@ -706,14 +697,6 @@ class MLAttention(nn.Module):
         # Compute output
         out = torch.einsum("bqhk,bqhkd->bqhd", attn_weights, v_selected)
         return out
-
-    def _apply_rotary_emb(self, x: Tensor, freqs_cis: Tensor) -> Tensor:
-        """Apply rotary positional embeddings."""
-        dtype = x.dtype
-        x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-        freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-        y = torch.view_as_real(x * freqs_cis).flatten(-2)
-        return y.to(dtype)
 
     def apply_tp(
         self,
