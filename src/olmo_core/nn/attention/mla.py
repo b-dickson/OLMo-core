@@ -19,22 +19,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.distributed import DeviceMesh
-from torch.distributed.tensor import Placement
 
 from olmo_core.config import Config
 
 from ..buffer_cache import BufferCache
 from ..layer_norm import RMSNorm
 from ..rope import ComplexRotaryEmbedding, RoPEConfig
-from .backend import AttentionBackend
-from .ring import RingAttentionLoadBalancerType
+from .backend import TorchAttentionBackend
 
 __all__ = [
     "MLAConfig",
     "IndexerConfig",
     "LightningIndexer",
-    "MLAAttentionBackend",
     "MLAKVCacheManager",
     "MLAttention",
 ]
@@ -61,7 +57,7 @@ class MLAConfig(Config):
     significantly reducing the KV cache size while maintaining performance.
     """
 
-    q_lora_rank: int = 1536
+    q_lora_rank: int = 0
     """Rank for low-rank query projection. Set to 0 to disable query compression."""
 
     kv_lora_rank: int = 512
@@ -108,74 +104,6 @@ class IndexerConfig(Config):
     Use Hadamard transform before computing index scores.
     Requires fast-hadamard-transform library.
     """
-
-
-class MLAAttentionBackend(AttentionBackend):
-    """
-    Attention backend for MLA with asymmetric head dimensions (qk_head_dim != v_head_dim).
-    """
-
-    def __init__(
-        self,
-        *,
-        qk_head_dim: int,
-        v_head_dim: int,
-        n_heads: int,
-        scale: Optional[float] = None,
-        dropout_p: float = 0.0,
-        cache: Optional[BufferCache] = None,
-    ):
-        super().__init__(
-            head_dim=qk_head_dim,
-            n_heads=n_heads,
-            n_kv_heads=n_heads,
-            scale=scale,
-            dropout_p=dropout_p,
-            window_size=(-1, -1),
-            cache=cache,
-        )
-        self.qk_head_dim = qk_head_dim
-        self.v_head_dim = v_head_dim
-
-    @classmethod
-    def assert_supported(cls):
-        pass
-
-    @classmethod
-    def assert_supports_swa(cls):
-        raise RuntimeError(f"'{cls.__name__}' doesn't support sliding window attention")
-
-    @classmethod
-    def assert_supports_cp(cls):
-        raise RuntimeError(f"'{cls.__name__}' doesn't support context parallelism")
-
-    @classmethod
-    def assert_supports_packed_qkv(cls):
-        raise RuntimeError(f"'{cls.__name__}' doesn't support packed QKV")
-
-    @classmethod
-    def assert_supports_kv_cache(cls):
-        raise RuntimeError(f"'{cls.__name__}' doesn't support KV caching")
-
-    def forward(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        is_causal: bool = True,
-    ) -> Tensor:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout_p if self.training else 0.0,
-            is_causal=is_causal,
-            scale=self.scale,
-        )
-
-        return out.transpose(1, 2)
 
 
 class LightningIndexer(nn.Module):
@@ -448,7 +376,6 @@ class MLAttention(nn.Module):
         self.indexer_config = indexer_config
         self.dropout = dropout
 
-        # Derived dimensions
         self.q_lora_rank = mla_config.q_lora_rank
         self.kv_lora_rank = mla_config.kv_lora_rank
         self.qk_nope_head_dim = mla_config.qk_nope_head_dim
@@ -492,7 +419,6 @@ class MLAttention(nn.Module):
             device=init_device,
         )
 
-        # Output projection
         self.w_out = nn.Linear(n_heads * self.v_head_dim, d_model, bias=bias, dtype=dtype, device=init_device)
 
         # RoPE module for positional embeddings
@@ -527,10 +453,10 @@ class MLAttention(nn.Module):
         self.use_sparse_attention: bool = True
 
         # Attention backend for dense attention
-        self.backend = MLAAttentionBackend(
-            qk_head_dim=self.qk_head_dim,
-            v_head_dim=self.v_head_dim,
+        self.backend = TorchAttentionBackend(
+            head_dim=self.qk_head_dim,
             n_heads=n_heads,
+            n_kv_heads=n_heads,  # MLA doesn't use GQA
             scale=self.softmax_scale,
             dropout_p=dropout,
             cache=cache,
@@ -639,9 +565,7 @@ class MLAttention(nn.Module):
         if top_k_indices is not None:
             att = self._sparse_attention(q, k, v, top_k_indices)
         else:
-            # Use causal attention for autoregressive decoding
-            is_causal = mask is None  # If no explicit mask, assume causal
-            att = self._dense_attention(q, k, v, is_causal=is_causal)
+            att = self._dense_attention(q, k, v)
 
         # Output projection
         return self.w_out(att.flatten(2))
@@ -651,9 +575,8 @@ class MLAttention(nn.Module):
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        is_causal: bool = False,
     ) -> Tensor:
-        return self.backend(q, k, v, is_causal=is_causal)
+        return self.backend((q, k, v))
 
     def _sparse_attention(
         self,
@@ -697,28 +620,6 @@ class MLAttention(nn.Module):
         # Compute output
         out = torch.einsum("bqhk,bqhkd->bqhd", attn_weights, v_selected)
         return out
-
-    def apply_tp(
-        self,
-        tp_mesh: DeviceMesh,
-        input_layout: Optional[Placement] = None,
-        output_layout: Optional[Placement] = None,
-        use_local_output: bool = True,
-        float8_enabled: bool = False,
-    ):
-        """Apply tensor parallelism to the attention module."""
-        # TODO: Implement tensor parallelism for MLA
-        raise NotImplementedError("Tensor parallelism not yet implemented for MLAttention")
-
-    def apply_cp(
-        self,
-        cp_mesh: DeviceMesh,
-        load_balancer: RingAttentionLoadBalancerType,
-        head_stride: int = 1,
-    ):
-        """Apply context parallelism to the attention module."""
-        # TODO: Implement context parallelism for MLA
-        raise NotImplementedError("Context parallelism not yet implemented for MLAttention")
 
     def num_flops_per_token(self, seq_len: int) -> int:
         # TODO: make sure this is accurate

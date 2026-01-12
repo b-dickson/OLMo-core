@@ -885,12 +885,12 @@ class TransformerConfig(ModelConfig):
         """
         A small MLA (Multi-head Latent Attention)
         """
-        d_model = kwargs.pop("d_model", 512)
-        n_heads = kwargs.pop("n_heads", 8)
-        n_layers = kwargs.pop("n_layers", 6)
+        d_model = kwargs.pop("d_model", 768)
+        n_heads = kwargs.pop("n_heads", 12)
+        n_layers = kwargs.pop("n_layers", 12)
 
         mla_config = MLAConfig(
-            q_lora_rank=kwargs.pop("q_lora_rank", d_model // 2),
+            q_lora_rank=kwargs.pop("q_lora_rank", 0),
             kv_lora_rank=kwargs.pop("kv_lora_rank", d_model // 4),
             qk_nope_head_dim=kwargs.pop("qk_nope_head_dim", 48),
             qk_rope_head_dim=kwargs.pop("qk_rope_head_dim", 16),

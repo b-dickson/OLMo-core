@@ -40,7 +40,6 @@ from .backend import (
 from .mla import (
     IndexerConfig,
     LightningIndexer,
-    MLAAttentionBackend,
     MLAConfig,
     MLAKVCacheManager,
     MLAttention,
@@ -71,7 +70,6 @@ __all__ = [
     "MLAConfig",
     "IndexerConfig",
     "MLAttention",
-    "MLAAttentionBackend",
     "MLAKVCacheManager",
     "LightningIndexer",
     "RingAttentionLoadBalancerType",
