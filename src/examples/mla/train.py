@@ -40,7 +40,7 @@ from olmo_core.utils import seed_all
 SEQUENCE_LENGTH = 1024
 
 #DATA_ROOT = os.environ.get("OLMO_DATA_ROOT", "http://olmo-data.org/examples/c4-en/gpt2").rstrip("/")
-DATA_ROOT = "/home/billy/Develop/ai2/OLMo-data/c4-en"
+DATA_ROOT = "../OLMo-data/c4-en"
 DATA_PATHS = [
     f"{DATA_ROOT}/c4-train.00000-00099.npy",
     #f"{DATA_ROOT}/c4-train.00100-00199.npy",
@@ -88,7 +88,7 @@ def build_config(run_name: str, overrides: List[str]) -> ExperimentConfig:
     )
 
     train_module_config = TransformerTrainModuleConfig(
-        rank_microbatch_size=32 * SEQUENCE_LENGTH,
+        rank_microbatch_size=128 * SEQUENCE_LENGTH,
         max_sequence_length=SEQUENCE_LENGTH,
         optim=AdamConfig(lr=1e-3),
         compile_model=True,
