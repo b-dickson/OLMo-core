@@ -61,4 +61,4 @@ site/
 core
 /dataset-cache/
 
-.history/
+.history/checkpoints/
