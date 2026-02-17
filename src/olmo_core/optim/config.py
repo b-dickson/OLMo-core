@@ -243,19 +243,14 @@ class MatrixAwareOptimConfig(OptimConfig, Generic[Opt]):
         embed_params = [
             f"embeddings.{n}" for n, p in model.embeddings.named_parameters() if p.ndim == 2
         ]
-        matrix_params = [f"blocks.{n}" for n, p in model.blocks.named_parameters() if p.ndim == 2]
+        # 2D and 3D+ params (e.g. conv1d from FLA layers) are treated as matrix params
+        # and optimized with Muon (using flatten=True for 3D+).
+        matrix_params = [f"blocks.{n}" for n, p in model.blocks.named_parameters() if p.ndim >= 2]
         vector_params = [f"blocks.{n}" for n, p in model.blocks.named_parameters() if p.ndim < 2]
         vector_params += [f"lm_head.{n}" for n, p in model.lm_head.named_parameters() if p.ndim < 2]
         lm_head_params = [
             f"lm_head.{n}" for n, p in model.lm_head.named_parameters() if p.ndim == 2
         ]
-
-        # Convolution layers typically use parameter tensors with 3+ dimensions. These are currently
-        # not supported. Experimental support for for 3+ dim parameters is available in the Muon
-        # optimizer. It simply flattens the parameters into a 2D tensor.
-        # Check for 3D+ parameters which are not supported
-        params_3d_plus = [n for n, p in model.named_parameters() if p.ndim > 2]
-        assert not params_3d_plus, f"3D+ parameters are not supported: {params_3d_plus}"
 
         # Assert all parameters are categorized
         all_model_params = {n for n, p in model.named_parameters() if p.requires_grad}

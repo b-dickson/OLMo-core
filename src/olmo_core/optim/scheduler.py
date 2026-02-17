@@ -386,6 +386,62 @@ class CosWithWarmup(Scheduler):
 
 @Scheduler.register("half_cos_with_warmup")
 @dataclass
+class CosWithWarmdown(Scheduler):
+    """
+    Stable learning rate with optional warmup, then cosine decay (warmdown) at the end.
+
+    This follows the nanochat convention:
+    - Optional linear warmup phase
+    - Stable LR for the middle portion
+    - Cosine decay in the final warmdown_fraction of training
+
+    Example with warmdown_fraction=0.5:
+        Steps 0-50%:  stable at initial_lr
+        Steps 50-100%: cosine decay from initial_lr to warmdown_min_lr
+    """
+
+    warmup: Optional[int] = None
+    warmup_fraction: Optional[float] = 0.0
+    warmdown_fraction: float = 0.5
+    warmdown_min_lr: float = 0.0
+
+    def __post_init__(self):
+        if self.warmup is None and self.warmup_fraction is None:
+            self.warmup_fraction = 0.0
+
+        if self.warmup is not None and self.warmup_fraction is not None and self.warmup_fraction != 0.0:
+            raise OLMoConfigurationError("Specify either 'warmup' or 'warmup_fraction', not both.")
+
+        if self.warmup_fraction is not None and (self.warmup_fraction < 0 or self.warmup_fraction > 1):
+            raise OLMoConfigurationError("'warmup_fraction' must be between 0 and 1.")
+
+        if self.warmdown_fraction < 0 or self.warmdown_fraction > 1:
+            raise OLMoConfigurationError("'warmdown_fraction' must be between 0 and 1.")
+
+    def get_lr(
+        self, initial_lr: Union[float, torch.Tensor], current: int, t_max: int
+    ) -> Union[float, torch.Tensor]:
+        if self.warmup is not None:
+            warmup = self.warmup
+        elif self.warmup_fraction is not None:
+            warmup = round(t_max * self.warmup_fraction)
+        else:
+            warmup = 0
+
+        warmdown_start = round(t_max * (1 - self.warmdown_fraction))
+
+        if current < warmup:
+            return _linear_warmup(initial_lr, current, warmup, 0.0)
+        elif current < warmdown_start:
+            return initial_lr
+        elif current >= t_max:
+            return self.warmdown_min_lr
+        else:
+            progress = (current - warmdown_start) / (t_max - warmdown_start)
+            return self.warmdown_min_lr + (initial_lr - self.warmdown_min_lr) * (1 + cos(pi * progress)) / 2
+
+
+@dataclass
 class HalfCosWithWarmup(Scheduler):
     """
     Second half of a cosine learning rate schedule, with a warmup before that.

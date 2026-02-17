@@ -63,6 +63,12 @@ class MuonConfig(MatrixAwareOptimConfig):
     this is the actual learning rate and no additional scaling is done.
     """
 
+    embed_lr: float | None = None
+    """Learning rate for embedding parameters. If None, uses base lr."""
+
+    lm_head_lr: float | None = None
+    """Learning rate for lm_head (unembedding) parameters. If None, uses base lr."""
+
     mu: float = 0.95
     """Momentum for Muon"""
 
@@ -81,8 +87,12 @@ class MuonConfig(MatrixAwareOptimConfig):
     adjust_lr: MuonAdjustLRStrategy | None = MuonAdjustLRStrategy.rms_norm
     """How to adjust the learning rate for Muon updates."""
 
-    flatten: bool = False
-    """Whether to flatten 3D+ tensors to 2D for Muon updates. Use this for convolutional layers."""
+    flatten: bool = True
+    """
+    Whether to flatten 3D+ parameter tensors (e.g. conv1d weights) to 2D before applying
+    Newton-Schulz orthogonalization. Required for models with convolution layers (e.g. FLA's
+    gated_deltanet).
+    """
 
     use_triton: bool = False
     """
@@ -108,13 +118,17 @@ class MuonConfig(MatrixAwareOptimConfig):
         matrix_override = OptimGroupOverride(params=params["matrix"], opts=dict())
 
         # Vector, embedding, and lm_head parameters are optimized with AdamW.
-        embed_override = OptimGroupOverride(
-            params=params["embed"], opts=dict(algorithm="adamw", weight_decay=0.0)
-        )
+        embed_opts: dict[str, Any] = dict(algorithm="adamw", weight_decay=0.0)
+        if self.embed_lr is not None:
+            embed_opts["lr"] = self.embed_lr
+        embed_override = OptimGroupOverride(params=params["embed"], opts=embed_opts)
+
         vector_override = OptimGroupOverride(params=params["vector"], opts=dict(algorithm="adamw"))
-        lm_head_override = OptimGroupOverride(
-            params=params["lm_head"], opts=dict(algorithm="adamw")
-        )
+
+        lm_head_opts: dict[str, Any] = dict(algorithm="adamw")
+        if self.lm_head_lr is not None:
+            lm_head_opts["lr"] = self.lm_head_lr
+        lm_head_override = OptimGroupOverride(params=params["lm_head"], opts=lm_head_opts)
 
         return [matrix_override, vector_override, embed_override, lm_head_override]
 
@@ -210,11 +224,14 @@ class MuonConfig(MatrixAwareOptimConfig):
         # https://docs.pytorch.org/docs/stable/compile/programming_model.recompilation.html
         torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 16)
 
+        # Filter out config fields that are used for group overrides but not passed to optimizer
+        muon_kwargs = {k: v for k, v in kwargs.items() if k not in ("embed_lr", "lm_head_lr")}
+
         parallelism_config = self.build_parallelism_config()
         optim = self.optimizer()(
             self.build_groups(model, strict=strict),
             **parallelism_config,
-            **kwargs,
+            **muon_kwargs,
         )
         return optim
 
