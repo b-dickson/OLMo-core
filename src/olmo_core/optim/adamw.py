@@ -289,3 +289,8 @@ class SkipStepAdamWConfig(OptimConfig[SkipStepAdamW]):
     @classmethod
     def optimizer(cls) -> Type[SkipStepAdamW]:
         return SkipStepAdamW
+
+    def build(self, model: torch.nn.Module, strict: bool = True) -> SkipStepAdamW:
+        # Match Muon behavior: allow more shape-specialized compile variants before failing.
+        torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 16)
+        return super().build(model, strict=strict)
