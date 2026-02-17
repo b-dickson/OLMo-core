@@ -39,6 +39,29 @@ class FLA(nn.Module):
         else:
             return self.inner(x)[0]  # returns out, ?, cache
 
+    def num_flops_per_token(self, seq_len: int) -> int:
+        del seq_len
+        # 6 FLOPs per parameter (2 ops * 3 for forward+backward), consistent with
+        # the rest of OLMo's idealized FLOPs accounting.
+        param_flops = 6 * sum(p.numel() for p in self.parameters())
+
+        # Add an explicit delta-rule state update/readout term for GatedDeltaNet.
+        # This keeps accounting conservative for isoFLOPs scheduling while staying
+        # independent of sequence length for linear-recurrent kernels.
+        inner = self.inner
+        if (
+            hasattr(inner, "num_v_heads")
+            and hasattr(inner, "head_k_dim")
+            and hasattr(inner, "head_v_dim")
+        ):
+            state_flops = 12 * int(inner.num_v_heads * inner.head_k_dim * inner.head_v_dim)
+            return param_flops + state_flops
+
+        raise NotImplementedError(
+            f"num_flops_per_token() is not implemented for FLA inner layer type "
+            f"'{type(inner).__name__}'"
+        )
+
     def apply_tp(
         self,
         tp_mesh: DeviceMesh,
