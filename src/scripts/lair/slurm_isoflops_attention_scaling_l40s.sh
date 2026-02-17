@@ -1,20 +1,20 @@
 #!/bin/bash
 
 #SBATCH --account=cogneuroai
-#SBATCH -J attn-ladder-h100
-#SBATCH --gres=gpu:H100:2
+#SBATCH -J attn-isoflops-l40s
+#SBATCH --gres=gpu:L40S:8
 #SBATCH --mem=256G
-#SBATCH --partition general
-#SBATCH --output=/data/user/dicksonb/logs/attention-scaling-ladder/%A_%a.txt
-#SBATCH --error=/data/user/dicksonb/logs/attention-scaling-ladder/%A_%a.err
+#SBATCH --partition=general
+#SBATCH --output=/data/user/dicksonb/logs/attention-scaling-isoflops/%A_%a.txt
+#SBATCH --error=/data/user/dicksonb/logs/attention-scaling-isoflops/%A_%a.err
 #SBATCH --mail-type=None
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=48:00:00
-# Set array range when submitting: sbatch --array=1-12 src/scripts/lair/slurm_attention_scaling_h100.sh
-# Optional override: MICROBATCH_DISCOUNT=<float> (default 1.0)
+# Set array range when submitting: sbatch --array=1-48 src/scripts/lair/slurm_isoflops_attention_scaling_l40s.sh
+# Optional override: MICROBATCH_DISCOUNT=<float> (default 1.5)
 
-CONFIG_FILE="${CONFIG_FILE:-src/scripts/lair/attention_scaling_config.txt}"
+CONFIG_FILE="${CONFIG_FILE:-src/scripts/lair/isoflops_attention_scaling_config.txt}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 
 # Read configuration for this array task (skip comments and blank lines)
@@ -27,27 +27,23 @@ fi
 
 ATTENTION_TYPE=$(echo "$CONFIG_LINE" | awk '{print $1}')
 SIZE=$(echo "$CONFIG_LINE" | awk '{print $2}')
-CHINCHILLA_MULTIPLE=$(echo "$CONFIG_LINE" | awk '{print $3}')
+TARGET_FLOPS=$(echo "$CONFIG_LINE" | awk '{print $3}')
 CONFIG_MICROBATCH_DISCOUNT=$(echo "$CONFIG_LINE" | awk '{print $4}')
 
-if [ "$CHINCHILLA_MULTIPLE" != "4.0" ] && [ "$CHINCHILLA_MULTIPLE" != "4" ]; then
-    echo "Error: config must specify chinchilla multiple=4 or 4.0. Found '${CHINCHILLA_MULTIPLE}'"
+if [ -z "${TARGET_FLOPS}" ]; then
+    echo "Error: missing target FLOPs in config line: ${CONFIG_LINE}"
     exit 1
 fi
-CHINCHILLA_MULTIPLE="4.0"
 
 DATA_DIR="${DATA_DIR:-/data/user/dicksonb/data/nanochat/tokenized/*.npy}"
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-/data/user/dicksonb/data}"
-MICROBATCH_DISCOUNT="${MICROBATCH_DISCOUNT:-1.0}"
-BATCH_SIZE_MULTIPLIER="${BATCH_SIZE_MULTIPLIER:-1.0}"
 if [ -z "${MICROBATCH_DISCOUNT+x}" ] && [ -n "${CONFIG_MICROBATCH_DISCOUNT}" ]; then
     MICROBATCH_DISCOUNT="${CONFIG_MICROBATCH_DISCOUNT}"
 fi
-MICROBATCH_DISCOUNT="${MICROBATCH_DISCOUNT:-1.0}"
-LADDER_PROJECT="${LADDER_PROJECT:-attn-scaling-ladder}"
+MICROBATCH_DISCOUNT="${MICROBATCH_DISCOUNT:-1.5}"
+LADDER_PROJECT="${LADDER_PROJECT:-attn-scaling-isoflops}"
 LADDER_WANDB_ENTITY="${LADDER_WANDB_ENTITY:-iu-cogai}"
-RUN_OPTIMIZER="${RUN_OPTIMIZER:-muon}"
-export LADDER_ROOT_DIR="/data/user/dicksonb/checkpoints"
+export LADDER_ROOT_DIR="${LADDER_ROOT_DIR:-/data/user/dicksonb/checkpoints}"
 
 if [ -z "${WANDB_API_KEY:-}" ]; then
   echo "Error: WANDB_API_KEY is not set. Set this environment variable before launching W&B runs."
@@ -68,45 +64,41 @@ ${PYTHON_BIN} -c "print('*'*50)"
 num_gpus=$(${PYTHON_BIN} -c "import torch; print(torch.cuda.device_count())")
 [ -n "$num_gpus" ] || num_gpus=0
 echo "Number of GPUs: $num_gpus"
-if [ "$num_gpus" -ne 2 ]; then
-    echo "Warning: expected 2 GPUs for H100 launcher, found ${num_gpus}."
+if [ "$num_gpus" -ne 8 ]; then
+    echo "Warning: expected 8 GPUs for L40S launcher, found ${num_gpus}."
 fi
 FORCE_MIN_WORLD_SIZE="${FORCE_MIN_WORLD_SIZE:-$num_gpus}"
 
-RUN_NAME="${ATTENTION_TYPE}-${CHINCHILLA_MULTIPLE}x-${SIZE}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}_${RUN_OPTIMIZER}"
+RUN_NAME="${ATTENTION_TYPE}-${SIZE}-${TARGET_FLOPS}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 
 echo "Attention type: ${ATTENTION_TYPE}"
 echo "Size: ${SIZE}"
-echo "Chinchilla multiple: ${CHINCHILLA_MULTIPLE}"
-echo "Batch size multiplier: ${BATCH_SIZE_MULTIPLIER}"
+echo "Target FLOPs: ${TARGET_FLOPS}"
 echo "Microbatch discount: ${MICROBATCH_DISCOUNT}"
 echo "Forced min world size: ${FORCE_MIN_WORLD_SIZE}"
-echo "Optimizer: ${RUN_OPTIMIZER}"
 echo "Train data: ${DATA_DIR}"
 echo "Eval data root: ${EVAL_DATA_DIR}"
 echo "W&B project: ${LADDER_PROJECT}"
 echo "W&B entity: ${LADDER_WANDB_ENTITY}"
 echo "Ladder root: ${LADDER_ROOT_DIR}"
 echo "Run name: ${RUN_NAME}"
-mkdir -p "/data/user/dicksonb/logs/attention-scaling-ladder"
+mkdir -p "/data/user/dicksonb/logs/attention-scaling-isoflops"
 
 FORCE_MIN_WORLD_SIZE="${FORCE_MIN_WORLD_SIZE}" \
 ${PYTHON_BIN} -m torch.distributed.run --standalone --nproc-per-node=$num_gpus \
-    src/scripts/train/ladder/wsds_attention_ladder.py \
+    src/scripts/train/ladder/isoflops_attention_ladder.py \
     run \
     --name="${RUN_NAME}" \
     --size=${SIZE} \
     --attention-type="${ATTENTION_TYPE}" \
-    --chinchilla-multiple=${CHINCHILLA_MULTIPLE} \
-    --batch-size-multiplier=${BATCH_SIZE_MULTIPLIER} \
+    --target-flops=${TARGET_FLOPS} \
     --microbatch-discount=${MICROBATCH_DISCOUNT} \
     --train-data="${DATA_DIR}" \
     --eval-data-dir="${EVAL_DATA_DIR}" \
     --sequence-length=2048 \
     --max-gpus=${num_gpus} \
     --wandb-entity="${LADDER_WANDB_ENTITY}" \
-    --project="${LADDER_PROJECT}" \
-    --optimizer="${RUN_OPTIMIZER}"
+    --project="${LADDER_PROJECT}"
 
 ${PYTHON_BIN} -c "print('*'*50)"
 echo "Job finished at $(date)"

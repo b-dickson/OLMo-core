@@ -42,6 +42,7 @@ DATA_DIR="${DATA_DIR:-/data/user/dicksonb/data/nanochat/tokenized/*.npy}"
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-/data/user/dicksonb/data}"
 LADDER_PROJECT="${LADDER_PROJECT:-attn-scaling-ladder}"
 LADDER_WANDB_ENTITY="${LADDER_WANDB_ENTITY:-iu-cogai}"
+RUN_OPTIMIZER="${RUN_OPTIMIZER:-muon}"
 export LADDER_ROOT_DIR="/data/user/dicksonb/checkpoints"
 
 if [ -z "${WANDB_API_KEY:-}" ]; then
@@ -71,7 +72,7 @@ if [ "$num_gpus" -eq 0 ]; then
     exit 1
 fi
 
-RUN_NAME="${ATTENTION_TYPE}-${CHINCHILLA_MULTIPLE}x-${SIZE}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+RUN_NAME="${ATTENTION_TYPE}-${CHINCHILLA_MULTIPLE}x-${SIZE}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}_${RUN_OPTIMIZER}"
 
 echo "Attention type: ${ATTENTION_TYPE}"
 echo "Size: ${SIZE}"
@@ -80,6 +81,7 @@ echo "Batch size multiplier: ${BATCH_SIZE_MULTIPLIER}"
 echo "Microbatch discount: ${MICROBATCH_DISCOUNT}"
 echo "Train data: ${DATA_DIR}"
 echo "Eval data root: ${EVAL_DATA_DIR}"
+echo "Optimizer: ${RUN_OPTIMIZER}"
 echo "W&B project: ${LADDER_PROJECT}"
 echo "W&B entity: ${LADDER_WANDB_ENTITY}"
 echo "Ladder root: ${LADDER_ROOT_DIR}"
@@ -101,7 +103,8 @@ ${PYTHON_BIN} -m torch.distributed.run --standalone --nproc-per-node=$num_gpus \
     --sequence-length=2048 \
     --max-gpus=${num_gpus} \
     --wandb-entity="${LADDER_WANDB_ENTITY}" \
-    --project="${LADDER_PROJECT}"
+    --project="${LADDER_PROJECT}" \
+    --optimizer="${RUN_OPTIMIZER}"
 
 ${PYTHON_BIN} -c "print('*'*50)"
 echo "Job finished at $(date)"

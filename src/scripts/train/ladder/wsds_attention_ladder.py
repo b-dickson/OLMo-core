@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import re
 import typing
 from dataclasses import dataclass, field
 
@@ -45,6 +46,16 @@ def get_cluster_root_dir(cluster: str) -> str:
     del cluster
     # Override this in Slurm/local with e.g. LADDER_ROOT_DIR=/data/user/dicksonb/checkpoints
     return os.environ.get("LADDER_ROOT_DIR", "gs://ai2-llm")
+
+
+def _ensure_attention_type_in_name(name: str, attention_type: str) -> str:
+    if attention_type in name:
+        return name
+    return f"{name}-{attention_type}"
+
+
+def _name_has_size_token(name: str, size_spec: str) -> bool:
+    return re.search(rf"(^|[-_]){re.escape(size_spec)}($|[-_])", name) is not None
 
 
 def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
@@ -224,6 +235,10 @@ class AttentionLadder(ModelLadder):
         )
         if self.wandb_entity:
             trainer_config.callbacks["wandb"].entity = self.wandb_entity
+        # If caller passed a fully-qualified run name containing size already (common for Slurm),
+        # avoid appending size a second time in the W&B run name.
+        if _name_has_size_token(self.name, str(size_spec)):
+            trainer_config.callbacks["wandb"].name = self.name
         # Always pin the project to a fixed ladder-level project unless explicitly overridden.
         if trainer_config.callbacks["wandb"].project is None:
             trainer_config.callbacks["wandb"].project = self.project or "attn-scaling-ladder"
@@ -386,14 +401,15 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         )
     ]
 
+    ladder_name = _ensure_attention_type_in_name(args.name, args.attention_type)
     ladder = AttentionLadder(
-        name=f"{args.name}-{args.attention_type}",
+        name=ladder_name,
         project=args.project or "attn-scaling-ladder",
         dir=str(
             io.join_path(
                 get_cluster_root_dir(args.cluster),
                 "model-ladders",
-                f"{args.name}-{args.attention_type}",
+                ladder_name,
             )
         ),
         wandb_entity=args.wandb_entity,
