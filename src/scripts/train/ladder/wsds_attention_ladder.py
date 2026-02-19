@@ -95,6 +95,12 @@ def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--sliding-window-size",
+        type=int,
+        default=1024,
+        help="Sliding-window size for the local layers when attention-type=sliding_gated.",
+    )
+    parser.add_argument(
         "--wandb-entity",
         type=str,
         default="iu-cogai",
@@ -353,13 +359,16 @@ class MuonWSDSAttentionLadderRunConfigurator(WSDSAttentionLadderRunConfigurator)
         )
 
 
-def _make_model_construction_kwargs(attention_type: str) -> dict[str, object]:
+def _make_model_construction_kwargs(
+    attention_type: str,
+    sliding_window_size: int,
+) -> dict[str, object]:
     if attention_type == "sliding_gated":
         return dict(
             sliding_window=SlidingWindowAttentionConfig(
                 force_full_attention_on_first_layer=False,
                 force_full_attention_on_last_layer=True,
-                pattern=[1024, 1024, 1024, -1],
+                pattern=[sliding_window_size, sliding_window_size, sliding_window_size, -1],
             ),
             gate=GateConfig(granularity=GateGranularity.headwise),
         )
@@ -423,7 +432,10 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             attention_type=args.attention_type,
             microbatch_discount=args.microbatch_discount,
             force_min_world_size=int(os.environ.get("FORCE_MIN_WORLD_SIZE", "0")) or None,
-            model_construction_kwargs=_make_model_construction_kwargs(args.attention_type),
+            model_construction_kwargs=_make_model_construction_kwargs(
+                args.attention_type,
+                sliding_window_size=args.sliding_window_size,
+            ),
         ),
         run_configurator=(
             MuonWSDSAttentionLadderRunConfigurator(

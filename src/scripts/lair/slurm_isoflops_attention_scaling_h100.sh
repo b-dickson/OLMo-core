@@ -25,10 +25,7 @@ if [ -z "$CONFIG_LINE" ]; then
     exit 1
 fi
 
-ATTENTION_TYPE=$(echo "$CONFIG_LINE" | awk '{print $1}')
-SIZE=$(echo "$CONFIG_LINE" | awk '{print $2}')
-TARGET_FLOPS=$(echo "$CONFIG_LINE" | awk '{print $3}')
-CONFIG_MICROBATCH_DISCOUNT=$(echo "$CONFIG_LINE" | awk '{print $4}')
+read -r ATTENTION_TYPE SIZE TARGET_FLOPS CONFIG_SEQUENCE_LENGTH CONFIG_MICROBATCH_DISCOUNT <<< "$CONFIG_LINE"
 
 if [ -z "${TARGET_FLOPS}" ]; then
     echo "Error: missing target FLOPs in config line: ${CONFIG_LINE}"
@@ -37,7 +34,17 @@ fi
 
 DATA_DIR="${DATA_DIR:-/data/user/dicksonb/data/nanochat/tokenized/*.npy}"
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-/data/user/dicksonb/data}"
-MICROBATCH_DISCOUNT="${MICROBATCH_DISCOUNT:-1.0}"
+SEQUENCE_LENGTH="${SEQUENCE_LENGTH:-2048}"
+SLIDING_WINDOW_SIZE="${SLIDING_WINDOW_SIZE:-1024}"
+
+# If the 4th token is numeric, treat it as sequence length; otherwise treat it as legacy
+# microbatch discount override.
+if [[ -n "${CONFIG_SEQUENCE_LENGTH}" && "${CONFIG_SEQUENCE_LENGTH}" =~ ^[0-9]+$ ]]; then
+    SEQUENCE_LENGTH="${CONFIG_SEQUENCE_LENGTH}"
+elif [ -n "${CONFIG_SEQUENCE_LENGTH}" ] && [ -z "${CONFIG_MICROBATCH_DISCOUNT}" ]; then
+    CONFIG_MICROBATCH_DISCOUNT="${CONFIG_SEQUENCE_LENGTH}"
+fi
+
 if [ -z "${MICROBATCH_DISCOUNT+x}" ] && [ -n "${CONFIG_MICROBATCH_DISCOUNT}" ]; then
     MICROBATCH_DISCOUNT="${CONFIG_MICROBATCH_DISCOUNT}"
 fi
@@ -70,12 +77,14 @@ if [ "$num_gpus" -ne 2 ]; then
 fi
 FORCE_MIN_WORLD_SIZE="${FORCE_MIN_WORLD_SIZE:-$num_gpus}"
 
-RUN_NAME="${ATTENTION_TYPE}-${SIZE}-${TARGET_FLOPS}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+RUN_NAME="${ATTENTION_TYPE}-${SIZE}-${TARGET_FLOPS}_seq${SEQUENCE_LENGTH}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 
 echo "Attention type: ${ATTENTION_TYPE}"
 echo "Size: ${SIZE}"
 echo "Target FLOPs: ${TARGET_FLOPS}"
 echo "Microbatch discount: ${MICROBATCH_DISCOUNT}"
+echo "Sliding window size: ${SLIDING_WINDOW_SIZE}"
+echo "Sequence length: ${SEQUENCE_LENGTH}"
 echo "Forced min world size: ${FORCE_MIN_WORLD_SIZE}"
 echo "Train data: ${DATA_DIR}"
 echo "Eval data root: ${EVAL_DATA_DIR}"
@@ -94,9 +103,10 @@ ${PYTHON_BIN} -m torch.distributed.run --standalone --nproc-per-node=$num_gpus \
     --attention-type="${ATTENTION_TYPE}" \
     --target-flops=${TARGET_FLOPS} \
     --microbatch-discount=${MICROBATCH_DISCOUNT} \
+    --sequence-length=${SEQUENCE_LENGTH} \
+    --sliding-window-size=${SLIDING_WINDOW_SIZE} \
     --train-data="${DATA_DIR}" \
     --eval-data-dir="${EVAL_DATA_DIR}" \
-    --sequence-length=2048 \
     --max-gpus=${num_gpus} \
     --wandb-entity="${LADDER_WANDB_ENTITY}" \
     --project="${LADDER_PROJECT}"

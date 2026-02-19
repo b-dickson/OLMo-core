@@ -22,14 +22,21 @@ if [ -z "$CONFIG_LINE" ]; then
     exit 1
 fi
 
-ATTENTION_TYPE=$(echo "$CONFIG_LINE" | awk '{print $1}')
-SIZE=$(echo "$CONFIG_LINE" | awk '{print $2}')
-CHINCHILLA_MULTIPLE=$(echo "$CONFIG_LINE" | awk '{print $3}')
-CONFIG_MICROBATCH_DISCOUNT=$(echo "$CONFIG_LINE" | awk '{print $4}')
+read -r ATTENTION_TYPE SIZE CHINCHILLA_MULTIPLE CONFIG_SEQUENCE_LENGTH CONFIG_MICROBATCH_DISCOUNT <<< "$CONFIG_LINE"
+BATCH_SIZE_MULTIPLIER="${BATCH_SIZE_MULTIPLIER:-1.0}"
+SEQUENCE_LENGTH="${SEQUENCE_LENGTH:-2048}"
+
+# If the 4th token is numeric, treat it as sequence length; otherwise treat it as legacy
+# microbatch discount override.
+if [[ -n "${CONFIG_SEQUENCE_LENGTH}" && "${CONFIG_SEQUENCE_LENGTH}" =~ ^[0-9]+$ ]]; then
+    SEQUENCE_LENGTH="${CONFIG_SEQUENCE_LENGTH}"
+elif [ -n "${CONFIG_SEQUENCE_LENGTH}" ] && [ -z "${CONFIG_MICROBATCH_DISCOUNT}" ]; then
+    CONFIG_MICROBATCH_DISCOUNT="${CONFIG_SEQUENCE_LENGTH}"
+fi
+
 if [ -z "${MICROBATCH_DISCOUNT+x}" ] && [ -n "${CONFIG_MICROBATCH_DISCOUNT}" ]; then
     MICROBATCH_DISCOUNT="${CONFIG_MICROBATCH_DISCOUNT}"
 fi
-BATCH_SIZE_MULTIPLIER="${BATCH_SIZE_MULTIPLIER:-1.0}"
 MICROBATCH_DISCOUNT="${MICROBATCH_DISCOUNT:-1.0}"
 
 if [ "$CHINCHILLA_MULTIPLE" != "4.0" ] && [ "$CHINCHILLA_MULTIPLE" != "4" ]; then
@@ -72,7 +79,7 @@ if [ "$num_gpus" -eq 0 ]; then
     exit 1
 fi
 
-RUN_NAME="${ATTENTION_TYPE}-${CHINCHILLA_MULTIPLE}x-${SIZE}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}_${RUN_OPTIMIZER}"
+RUN_NAME="${ATTENTION_TYPE}-${CHINCHILLA_MULTIPLE}x-${SIZE}_seq${SEQUENCE_LENGTH}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}_${RUN_OPTIMIZER}"
 
 echo "Attention type: ${ATTENTION_TYPE}"
 echo "Size: ${SIZE}"
@@ -100,7 +107,7 @@ ${PYTHON_BIN} -m torch.distributed.run --standalone --nproc-per-node=$num_gpus \
     --microbatch-discount=${MICROBATCH_DISCOUNT} \
     --train-data="${DATA_DIR}" \
     --eval-data-dir="${EVAL_DATA_DIR}" \
-    --sequence-length=2048 \
+    --sequence-length=${SEQUENCE_LENGTH} \
     --max-gpus=${num_gpus} \
     --wandb-entity="${LADDER_WANDB_ENTITY}" \
     --project="${LADDER_PROJECT}" \
