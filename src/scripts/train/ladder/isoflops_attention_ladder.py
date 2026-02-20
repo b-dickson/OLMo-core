@@ -435,7 +435,7 @@ class AttentionModelConfigurator(Olmo3ModelConfigurator):
         )
 
         if self.attention_type == "hybrid_gated_deltanet":
-            head_dim = int(0.75 * model.d_model / model.block.attention.n_heads)
+            head_dim = int(0.75 * model.d_model / model.block.sequence_mixer.n_heads)
             model.block.name = TransformerBlockType.fla_hybrid
             model.block.fla = FLAConfig(
                 name="GatedDeltaNet",
