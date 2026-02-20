@@ -57,6 +57,20 @@ src/scripts/modal/launch_wsds_attention_scaling.sh \
   --ladder-root-dir r2://llm-data/checkpoints/attn-scaling-ladder
 ```
 
+## Docker image
+
+The launcher pulls a pre-built image from `ghcr.io/allenai/olmo-core:latest` by default.
+This image includes all heavy dependencies (PyTorch, flash-attn, FLA, etc.) so there is no compilation at launch time.
+
+To use a custom image, set the `OLMO_DOCKER_IMAGE` environment variable:
+
+```bash
+OLMO_DOCKER_IMAGE=ghcr.io/your-org/olmo-core:custom \
+  src/scripts/modal/launch_wsds_attention_scaling.sh --array=7 --gpus 8
+```
+
+Your local source code is always mounted into the container via `.add_local_dir()`, so code changes do not require rebuilding the image.
+
 ## Notes
 
 - `--array` supports values like `5`, `1,3,7`, and `1-12`.

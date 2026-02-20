@@ -22,7 +22,13 @@ from typing import Any
 
 import modal
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+# When running locally, __file__ is src/scripts/modal/attention_ladder_modal.py (3 parents up).
+# When running inside a Modal container, the script is at /root/attention_ladder_modal.py,
+# so we fall back to the remote repo path.
+try:
+    REPO_ROOT = Path(__file__).resolve().parents[3]
+except IndexError:
+    REPO_ROOT = Path("/repo/olmo-core")
 DEFAULT_WSDS_CONFIG = REPO_ROOT / "src/scripts/lair/attention_scaling_config.txt"
 DEFAULT_ISOFLOPS_CONFIG = REPO_ROOT / "src/scripts/lair/isoflops_attention_scaling_config.txt"
 REMOTE_REPO_PATH = "/repo/olmo-core"
@@ -110,21 +116,45 @@ _modal_image = (
 @app.function(
     gpu=f"H100:{max(1, _MODAL_GPU_COUNT)}",
     image=_modal_image,
-    timeout=172800,
+    timeout=86400,
     retries=0,
     secrets=[modal.Secret.from_name(MODAL_SECRET_NAME)],
 )
 def run_training_command(command: list[str], env_vars: dict[str, Any], run_name: str) -> None:
     merged_env = os.environ.copy()
     merged_env.update({k: str(v) for k, v in env_vars.items()})
-    proc = subprocess.run(
-        command,
+    # Write torchrun worker logs to /tmp so we can read them on failure
+    log_dir = f"/tmp/torchrun_logs_{run_name}"
+    print(f"[Modal] Starting: {run_name}")
+    print(f"[Modal] Command: {' '.join(command)}")
+    sys.stdout.flush()
+    # Insert --log-dir right after torchrun to capture per-rank output
+    cmd = list(command)
+    if cmd and cmd[0] == "torchrun":
+        cmd.insert(1, f"--log-dir={log_dir}")
+    returncode = subprocess.call(
+        cmd,
         cwd=str(REMOTE_LAUNCH_DIR),
         env=merged_env,
-        check=True,
-        text=True,
     )
-    print(f"Modal run finished for {run_name} (returncode={proc.returncode})")
+    if returncode != 0:
+        # Read per-rank log files for the real traceback
+        error_logs = ""
+        try:
+            import glob
+            for log_file in sorted(glob.glob(f"{log_dir}/**/*", recursive=True)):
+                if os.path.isfile(log_file):
+                    with open(log_file) as f:
+                        content = f.read()
+                        if content.strip():
+                            error_logs += f"\n--- {log_file} ---\n{content[-3000:]}\n"
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Training failed for {run_name} (exit code {returncode}).\n"
+            f"{error_logs if error_logs else 'No log files found.'}"
+        )
+    print(f"[Modal] Finished: {run_name}")
 
 
 def load_wsds_rows(config_file: Path) -> list[WsdsConfigRow]:
