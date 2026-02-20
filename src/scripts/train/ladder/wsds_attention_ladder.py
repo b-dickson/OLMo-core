@@ -61,6 +61,12 @@ def _name_has_size_token(name: str, size_spec: str) -> bool:
 def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
     del cmd
     parser.add_argument(
+        "--backend",
+        type=str,
+        default="cpu:gloo,cuda:nccl",
+        help="Distributed backend for `prepare_training_environment` (set `none` for CPU local run).",
+    )
+    parser.add_argument(
         "--attention-type",
         type=str,
         default="sliding_gated",
@@ -460,6 +466,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             instance_filter_config=InstanceFilterConfig(),
         ),
         eval_data_base_dir=args.eval_data_dir,
+        backend=None if args.backend == "none" else args.backend,
     )
     return ladder
 
