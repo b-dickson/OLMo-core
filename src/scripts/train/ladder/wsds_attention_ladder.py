@@ -113,6 +113,12 @@ def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         help="Explicit W&B entity for logging.",
     )
     parser.add_argument(
+        "--no-grad-accum",
+        action="store_true",
+        default=False,
+        help="Set rank microbatch size equal to the global batch size (no gradient accumulation).",
+    )
+    parser.add_argument(
         "--optimizer",
         type=str,
         default="muon",
@@ -174,6 +180,16 @@ class AttentionLadder(ModelLadder):
             requested_devices,
             _,
         ) = self._configure_batch_size_and_num_devices(size_spec, num_params)
+
+        # With no_grad_accum, set rank microbatch = global batch so there's only 1 accum step.
+        # We do this *after* the normal computation so global_batch_size is properly aligned
+        # to a multiple of sequence_length.
+        if (
+            isinstance(self.model_configurator, AttentionModelConfigurator)
+            and self.model_configurator.no_grad_accum
+        ):
+            rank_microbatch_size = global_batch_size
+
         if requested_devices != dist_utils.get_world_size():
             raise OLMoConfigurationError(
                 f"Requested {requested_devices} devices for model of size '{size_spec}', "
@@ -269,6 +285,7 @@ class AttentionLadder(ModelLadder):
 class AttentionModelConfigurator(Olmo3ModelConfigurator):
     attention_type: str = "sliding_gated"
     microbatch_discount: float = 1.0
+    no_grad_accum: bool = False
     force_min_world_size: int | None = None
 
     def configure_model(
@@ -428,7 +445,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             )
         ),
         wandb_entity=args.wandb_entity,
-        sizes=list(TransformerSize),
+        sizes=[args.size],
         max_devices=args.max_gpus,
         device_type=get_cluster_gpu_type(args.cluster),
         model_configurator=AttentionModelConfigurator(
@@ -437,6 +454,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
             else args.rank_mbz * args.sequence_length,
             attention_type=args.attention_type,
             microbatch_discount=args.microbatch_discount,
+            no_grad_accum=args.no_grad_accum,
             force_min_world_size=int(os.environ.get("FORCE_MIN_WORLD_SIZE", "0")) or None,
             model_construction_kwargs=_make_model_construction_kwargs(
                 args.attention_type,
