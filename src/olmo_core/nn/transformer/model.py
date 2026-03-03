@@ -45,9 +45,11 @@ from ..attention import (
 )
 from ..buffer_cache import BufferCache
 from ..functional import l2_normalize
+from ..hyper_connections import HyperConnectionStream, IdentityHyperConnectionConfig
 from ..layer_norm import LayerNormConfig
 from ..lm_head import LMHeadConfig, LMOutputWithLoss
 from ..moe import MoEBase
+from ..residual_stream import ResidualStream
 from ..rope import RoPEBuffers, RotaryEmbeddingBase
 from ..utils import selective_checkpointing_context_fn
 from .block import (
@@ -78,6 +80,33 @@ __all__ = [
 
 
 log = logging.getLogger(__name__)
+
+
+def _apply_hyper_connections(
+    block: TransformerBlockBase, hc_config: IdentityHyperConnectionConfig
+) -> None:
+    """
+    Replace :class:`ResidualStream` modules in *block* with :class:`HyperConnectionStream` instances.
+    """
+    rs_attr_pairs: list[str] = []
+    if isinstance(block, TransformerBlock):
+        rs_attr_pairs = ["attention_residual_stream", "feed_forward_residual_stream"]
+    elif isinstance(block, FLABlock):
+        rs_attr_pairs = ["fla_residual_stream"]
+        if block.ffn_residual_stream is not None:
+            rs_attr_pairs.append("ffn_residual_stream")
+
+    for attr in rs_attr_pairs:
+        old_rs = getattr(block, attr, None)
+        if old_rs is not None and isinstance(old_rs, ResidualStream):
+            setattr(
+                block,
+                attr,
+                HyperConnectionStream(
+                    n_streams=hc_config.n_streams,
+                    init_strategy=hc_config.init_strategy,
+                ),
+            )
 
 
 class Transformer(nn.Module):
@@ -118,6 +147,7 @@ class Transformer(nn.Module):
         block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None,
         block_pattern: Optional[List[str]] = None,
         embed_scale: Optional[float] = None,
+        hyper_connections: Optional[IdentityHyperConnectionConfig] = None,
     ):
         super().__init__()
 
@@ -160,6 +190,14 @@ class Transformer(nn.Module):
         self.lm_head = lm_head.build(
             d_model=d_model, vocab_size=vocab_size, init_device=init_device
         )
+
+        # Apply hyper connections (replace ResidualStream -> HyperConnectionStream in blocks).
+        if hyper_connections is not None:
+            self._hc_n_streams = hyper_connections.n_streams
+            for blk in self.blocks.values():
+                _apply_hyper_connections(blk, hyper_connections)
+        else:
+            self._hc_n_streams = 0
 
         self.init_device = init_device
         self.init_method = InitMethod(init_method)
@@ -553,6 +591,10 @@ class Transformer(nn.Module):
         if self.embedding_norm is not None:
             h = self.embedding_norm(h)
 
+        # Expand to multi-stream state for hyper connections.
+        if self._hc_n_streams > 0:
+            h = h.unsqueeze(-2).expand(*h.shape[:-1], self._hc_n_streams, h.shape[-1]).contiguous()
+
         # Run each block.
         for block_key, block in self.blocks.items():
             block_idx = int(block_key)
@@ -561,6 +603,10 @@ class Transformer(nn.Module):
             if self.compile_enabled:
                 mark_dynamic(h, (0, 1), strict=False)
             h = block(h, **all_block_kwargs, **block_kwargs)
+
+        # Reduce multi-stream state back to single stream.
+        if self._hc_n_streams > 0:
+            h = h.sum(dim=-2)
 
         # Get final logits but again pass-through in case of pipeline parallelism.
         if self.lm_head is not None:

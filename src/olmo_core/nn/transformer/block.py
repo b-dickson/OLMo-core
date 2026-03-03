@@ -150,8 +150,10 @@ class TransformerBlock(TransformerBlockBase):
         **kwargs,
     ) -> torch.Tensor:
         del loss_div_factor
-        h = self.attention_residual_stream(x, self.attention(self.attention_norm(x), **kwargs))
-        return self.feed_forward_residual_stream(h, self.feed_forward(self.feed_forward_norm(h)))
+        x_in = self.attention_residual_stream.merge(x)
+        h = self.attention_residual_stream(x, self.attention(self.attention_norm(x_in), **kwargs))
+        h_in = self.feed_forward_residual_stream.merge(h)
+        return self.feed_forward_residual_stream(h, self.feed_forward(self.feed_forward_norm(h_in)))
 
     def apply_tp(
         self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
@@ -282,12 +284,14 @@ class LayerNormScaledTransformerBlock(TransformerBlock):
         **kwargs,
     ) -> torch.Tensor:
         del loss_div_factor
-        scale = self.ln_scale.to(dtype=x.dtype, device=x.device)
+        x_in = self.attention_residual_stream.merge(x)
+        scale = self.ln_scale.to(dtype=x_in.dtype, device=x_in.device)
         h = self.attention_residual_stream(
-            x, self.attention(self.attention_norm(x) * scale, **kwargs)
+            x, self.attention(self.attention_norm(x_in) * scale, **kwargs)
         )
+        h_in = self.feed_forward_residual_stream.merge(h)
         return self.feed_forward_residual_stream(
-            h, self.feed_forward(self.feed_forward_norm(h) * scale)
+            h, self.feed_forward(self.feed_forward_norm(h_in) * scale)
         )
 
 
@@ -306,8 +310,10 @@ class ReorderedNormTransformerBlock(TransformerBlock):
         **kwargs,
     ) -> torch.Tensor:
         del loss_div_factor
-        h = self.attention_residual_stream(x, self.attention_norm(self.attention(x, **kwargs)))
-        return self.feed_forward_residual_stream(h, self.feed_forward_norm(self.feed_forward(h)))
+        x_in = self.attention_residual_stream.merge(x)
+        h = self.attention_residual_stream(x, self.attention_norm(self.attention(x_in, **kwargs)))
+        h_in = self.feed_forward_residual_stream.merge(h)
+        return self.feed_forward_residual_stream(h, self.feed_forward_norm(self.feed_forward(h_in)))
 
 
 class PeriNormTransformerBlock(TransformerBlock):
@@ -354,11 +360,13 @@ class PeriNormTransformerBlock(TransformerBlock):
         **kwargs,
     ) -> torch.Tensor:
         del loss_div_factor
+        x_in = self.attention_residual_stream.merge(x)
         h = self.attention_residual_stream(
-            x, self.post_attention_norm(self.attention(self.attention_norm(x), **kwargs))
+            x, self.post_attention_norm(self.attention(self.attention_norm(x_in), **kwargs))
         )
+        h_in = self.feed_forward_residual_stream.merge(h)
         return self.feed_forward_residual_stream(
-            h, self.post_feed_forward_norm(self.feed_forward(self.feed_forward_norm(h)))
+            h, self.post_feed_forward_norm(self.feed_forward(self.feed_forward_norm(h_in)))
         )
 
     def apply_tp(
@@ -1116,13 +1124,17 @@ class FLABlock(TransformerBlockBase):
         self.block_idx = block_idx
         self.fla = fla.build(d_model, n_heads, init_device=init_device)
         self.fla_norm = layer_norm.build(d_model, init_device=init_device)
+        self.fla_residual_stream = ResidualStream(dropout=dropout)
         if feed_forward is not None:
             self.feed_forward = feed_forward.build(d_model=d_model, init_device=init_device)
             self.feed_forward_norm = layer_norm.build(d_model, init_device=init_device)
+            self.ffn_residual_stream = ResidualStream(dropout=dropout)
         else:
             self.feed_forward = None
             self.feed_forward_norm = None
+            self.ffn_residual_stream = None
 
+        # Keep for backward compat (e.g. TP parallelization of dropout).
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(
@@ -1133,13 +1145,16 @@ class FLABlock(TransformerBlockBase):
         **kwargs,
     ) -> torch.Tensor:
         del loss_div_factor
-        h = x + self.dropout(self.fla(self.fla_norm(x), **kwargs))
+        x_in = self.fla_residual_stream.merge(x)
+        h = self.fla_residual_stream(x, self.fla(self.fla_norm(x_in), **kwargs))
 
         if self.feed_forward is None or self.feed_forward_norm is None:
             assert self.feed_forward is None and self.feed_forward_norm is None
             return h
         else:
-            return h + self.dropout(self.feed_forward(self.feed_forward_norm(h)))
+            assert self.ffn_residual_stream is not None
+            h_in = self.ffn_residual_stream.merge(h)
+            return self.ffn_residual_stream(h, self.feed_forward(self.feed_forward_norm(h_in)))
 
     def apply_compile(self):
         return self.compile(fullgraph=False, dynamic=False)
@@ -1180,7 +1195,11 @@ class FLABlock(TransformerBlockBase):
         )
 
         parallelize_module(self.fla_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel())
-        parallelize_module(self.dropout, device_mesh=tp_mesh, parallelize_plan=SequenceParallel())
+        parallelize_module(
+            self.fla_residual_stream.dropout,
+            device_mesh=tp_mesh,
+            parallelize_plan=SequenceParallel(),
+        )
 
         self.fla.apply_tp(
             tp_mesh,

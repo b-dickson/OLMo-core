@@ -15,5 +15,15 @@ class ResidualStream(nn.Module):
         self.alpha = alpha
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
+    def merge(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extract sublayer input from residual state.
+
+        For a standard residual stream this is the identity. Subclasses (e.g.
+        :class:`~olmo_core.nn.hyper_connections.HyperConnectionStream`) override this
+        to merge multiple streams.
+        """
+        return x
+
     def forward(self, residual: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         return torch.add(residual, self.dropout(x), alpha=self.alpha)

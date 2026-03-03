@@ -1,3 +1,4 @@
+from ..hyper_connections import HyperConnectionStream, IdentityHyperConnectionConfig
 from .block import (
     FLABlock,
     LayerNormScaledTransformerBlock,
@@ -46,4 +47,6 @@ __all__ = [
     "TransformerDataParallelWrappingStrategy",
     "TransformerActivationCheckpointingMode",
     "InitMethod",
+    "IdentityHyperConnectionConfig",
+    "HyperConnectionStream",
 ]

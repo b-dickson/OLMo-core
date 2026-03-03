@@ -11,14 +11,28 @@ from olmo_core.data import DataMix, TokenizerConfig
 from olmo_core.data.composable import *
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.internal.ladder import main
-from olmo_core.model_ladder import DeviceMeshSpec, ModelLadder, Olmo3ModelConfigurator, RunConfigurator
-from olmo_core.model_ladder import TransformerSize
-from olmo_core.optim import MuonConfig, Scheduler, SchedulerUnits, WSD
-from olmo_core.optim.muon import MuonAdjustLRStrategy
-from olmo_core.nn.attention import GateConfig, GateGranularity, SlidingWindowAttentionConfig
+from olmo_core.model_ladder import (
+    DeviceMeshSpec,
+    ModelLadder,
+    Olmo3ModelConfigurator,
+    RunConfigurator,
+    TransformerSize,
+)
+from olmo_core.nn.attention import (
+    GateConfig,
+    GateGranularity,
+    SlidingWindowAttentionConfig,
+)
 from olmo_core.nn.fla import FLAConfig
+from olmo_core.nn.hyper_connections import IdentityHyperConnectionConfig
 from olmo_core.nn.transformer import TransformerBlockType
-from olmo_core.train import Duration, prepare_training_environment, teardown_training_environment
+from olmo_core.optim import WSD, MuonConfig, Scheduler, SchedulerUnits
+from olmo_core.optim.muon import MuonAdjustLRStrategy
+from olmo_core.train import (
+    Duration,
+    prepare_training_environment,
+    teardown_training_environment,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +76,9 @@ class KarpathyMuonScheduleCallback(callbacks.Callback):
     momentum_end: float = 0.95
     momentum_warmup_steps: int = 300
     _muon_group_indices: list[int] = field(default_factory=list, init=False, repr=False)
-    _initial_group_weight_decay: dict[int, float] = field(default_factory=dict, init=False, repr=False)
+    _initial_group_weight_decay: dict[int, float] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def pre_train(self):
         if not self.enabled:
@@ -88,9 +104,9 @@ class KarpathyMuonScheduleCallback(callbacks.Callback):
         # Trainer step starts at 1; nanochat schedule starts at 0.
         step0 = max(self.step - 1, 0)
         momentum_frac = min(step0 / self.momentum_warmup_steps, 1.0)
-        muon_momentum = self.momentum_start + (
-            self.momentum_end - self.momentum_start
-        ) * momentum_frac
+        muon_momentum = (
+            self.momentum_start + (self.momentum_end - self.momentum_start) * momentum_frac
+        )
         wd_scale = max(0.0, 1.0 - (step0 / max_steps))
 
         optim = self.trainer.train_module.optim
@@ -288,7 +304,12 @@ class IsoFlopsAttentionLadder(ModelLadder):
         flops_per_token = _get_model_flops_per_token_strict(model, self.sequence_length)
         d_model = int(model.d_model)
         n_layers = int(model.n_layers)
-        self._model_stats_cache[size_spec] = (int(num_params), int(flops_per_token), d_model, n_layers)
+        self._model_stats_cache[size_spec] = (
+            int(num_params),
+            int(flops_per_token),
+            d_model,
+            n_layers,
+        )
         self._num_params_cache[size_spec] = num_params
         log.info(
             "Model stats for %s: non-embedding params=%s, FLOPs/token=%s, d_model=%d, n_layers=%d",
@@ -418,6 +439,7 @@ class AttentionModelConfigurator(Olmo3ModelConfigurator):
     attention_type: str = "sliding_gated"
     microbatch_discount: float = 1.0
     force_min_world_size: int | None = None
+    hyper_connections_n_streams: int = 0
 
     def configure_model(
         self,
@@ -445,6 +467,12 @@ class AttentionModelConfigurator(Olmo3ModelConfigurator):
             model.block.fla_hybrid_attention_indices = [
                 i for i in range(model.n_layers) if i % 4 == 3
             ]
+
+        if self.hyper_connections_n_streams > 0:
+            model.hyper_connections = IdentityHyperConnectionConfig(
+                n_streams=self.hyper_connections_n_streams,
+            )
+
         return model
 
     def configure_rank_microbatch_size(
@@ -620,6 +648,12 @@ def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         default="iu-cogai",
         help="Explicit W&B entity for logging.",
     )
+    parser.add_argument(
+        "--hyper-connections",
+        type=int,
+        default=0,
+        help="Number of Identity HC streams (0=disabled, 4=typical).",
+    )
 
 
 def configure_ladder(args: argparse.Namespace) -> ModelLadder:
@@ -677,6 +711,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
                 args.attention_type,
                 sliding_window_size=args.sliding_window_size,
             ),
+            hyper_connections_n_streams=args.hyper_connections,
         ),
         run_configurator=KarpathyIsoFlopsRunConfigurator(
             target_flops=args.target_flops,

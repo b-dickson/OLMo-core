@@ -11,6 +11,7 @@ from olmo_core.doc_utils import beta_feature
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.nn.attention.base import SequenceMixerConfig
 from olmo_core.nn.fla import FLAConfig, FLAModelConfig
+from olmo_core.nn.hyper_connections import IdentityHyperConnectionConfig
 from olmo_core.utils import ensure_multiple_of
 
 from ..attention import (
@@ -377,6 +378,7 @@ class TransformerConfig(ModelConfig):
     block_pattern: Optional[List[str]] = None
     block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None
     embed_scale: Optional[float] = None
+    hyper_connections: Optional[IdentityHyperConnectionConfig] = None
     fla_config: Optional[FLAModelConfig] = None
 
     def __post_init__(self):
@@ -430,6 +432,7 @@ class TransformerConfig(ModelConfig):
                 block_overrides=self.block_overrides,
                 block_pattern=self.block_pattern,
                 embed_scale=self.embed_scale,
+                hyper_connections=self.hyper_connections,
             )
         elif self.name == TransformerType.normalized:
             assert self.embedding_norm is None
@@ -520,6 +523,13 @@ class TransformerConfig(ModelConfig):
         # LM head.
         num_params += self.lm_head.num_params(self.d_model, self.vocab_size)
 
+        # Hyper connection parameters: 2 vectors (h_pre, h_post) per sublayer, 2 sublayers per block.
+        if self.hyper_connections is not None:
+            num_sublayers_per_block = 2
+            num_params += (
+                self.n_layers * num_sublayers_per_block * 2 * self.hyper_connections.n_streams
+            )
+
         return num_params
 
     @property
@@ -540,6 +550,13 @@ class TransformerConfig(ModelConfig):
 
         # LM head.
         num_active_params += self.lm_head.num_params(self.d_model, self.vocab_size)
+
+        # Hyper connection parameters (always active).
+        if self.hyper_connections is not None:
+            num_sublayers_per_block = 2
+            num_active_params += (
+                self.n_layers * num_sublayers_per_block * 2 * self.hyper_connections.n_streams
+            )
 
         return num_active_params
 
