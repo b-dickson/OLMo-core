@@ -25,6 +25,7 @@ from olmo_core.nn.attention import (
     SlidingWindowAttentionConfig,
 )
 from olmo_core.nn.fla import FLAConfig
+from olmo_core.nn.hyper_connections import IdentityHyperConnectionConfig
 from olmo_core.nn.transformer import TransformerBlockType
 from olmo_core.optim.muon import MuonAdjustLRStrategy, MuonConfig
 from olmo_core.train import prepare_training_environment, teardown_training_environment
@@ -128,6 +129,12 @@ def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         default="muon",
         choices=["muon", "skipstep_adamw"],
         help="Optimizer family to use for WSDS ladder runs.",
+    )
+    parser.add_argument(
+        "--hyper-connections",
+        type=int,
+        default=0,
+        help="Number of Identity HC streams (0=disabled, 4=typical).",
     )
 
 
@@ -291,6 +298,7 @@ class AttentionModelConfigurator(Olmo3ModelConfigurator):
     microbatch_discount: float = 1.0
     no_grad_accum: bool = False
     force_min_world_size: int | None = None
+    hyper_connections_n_streams: int = 0
 
     def configure_model(
         self,
@@ -318,6 +326,12 @@ class AttentionModelConfigurator(Olmo3ModelConfigurator):
             model.block.fla_hybrid_attention_indices = [
                 i for i in range(model.n_layers) if i % 4 == 3
             ]
+
+        if self.hyper_connections_n_streams > 0:
+            model.hyper_connections = IdentityHyperConnectionConfig(
+                n_streams=self.hyper_connections_n_streams,
+            )
+
         return model
 
     def configure_rank_microbatch_size(
@@ -464,6 +478,7 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
                 args.attention_type,
                 sliding_window_size=args.sliding_window_size,
             ),
+            hyper_connections_n_streams=args.hyper_connections,
         ),
         run_configurator=(
             MuonWSDSAttentionLadderRunConfigurator(
