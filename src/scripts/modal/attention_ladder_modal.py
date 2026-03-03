@@ -13,9 +13,9 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -194,7 +194,9 @@ def run_training_command(command: list[str], env_vars: dict[str, Any], run_name:
     r2_profile = _resolve_r2_profile(merged_env)
     r2_endpoint = merged_env.get("R2_ENDPOINT_URL", "")
     access_key = merged_env.get("AWS_ACCESS_KEY_ID", "") or merged_env.get("R2_ACCESS_KEY_ID", "")
-    secret_key = merged_env.get("AWS_SECRET_ACCESS_KEY", "") or merged_env.get("R2_SECRET_ACCESS_KEY", "")
+    secret_key = merged_env.get("AWS_SECRET_ACCESS_KEY", "") or merged_env.get(
+        "R2_SECRET_ACCESS_KEY", ""
+    )
     session_token = merged_env.get("AWS_SESSION_TOKEN") or merged_env.get("R2_SESSION_TOKEN")
     region = merged_env.get("AWS_DEFAULT_REGION") or merged_env.get("AWS_REGION")
     _write_aws_profile_files(
@@ -233,6 +235,7 @@ def run_training_command(command: list[str], env_vars: dict[str, Any], run_name:
         error_logs = ""
         try:
             import glob
+
             for log_file in sorted(glob.glob(f"{log_dir}/**/*", recursive=True)):
                 if os.path.isfile(log_file):
                     with open(log_file) as f:
@@ -522,9 +525,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if args.project is None:
-        args.project = (
-            "attn-scaling-isoflops" if args.mode == "isoflops" else "attn-scaling-ladder"
-        )
+        args.project = "attn-scaling-isoflops" if args.mode == "isoflops" else "attn-scaling-ladder"
     env_vars = _collect_passthrough_env()
     if args.ladder_root_dir:
         env_vars["LADDER_ROOT_DIR"] = args.ladder_root_dir
@@ -552,7 +553,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.dry_run:
         print("Modal dry-run: no remote submission; commands below for inspection.")
 
-    print(f"Modal launcher starting: mode={args.mode}, selected={len(task_ids)} tasks, gpus={args.gpus}")
+    print(
+        f"Modal launcher starting: mode={args.mode}, selected={len(task_ids)} tasks, gpus={args.gpus}"
+    )
     for idx in task_ids:
         row = rows[idx - 1]
         command, run_name = launch_fn(row, args, idx)

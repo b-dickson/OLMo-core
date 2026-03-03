@@ -8,14 +8,17 @@ from dataclasses import dataclass, field
 import olmo_core.distributed.utils as dist_utils
 import olmo_core.io as io
 import olmo_core.train.callbacks as callbacks
-
 from olmo_core.data import DataMix, TokenizerConfig
 from olmo_core.data.composable import *
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.internal.ladder import main
-from olmo_core.model_ladder import DeviceMeshSpec, ModelLadder, Olmo3ModelConfigurator, TransformerSize
-from olmo_core.model_ladder import WSDSChinchillaRunConfigurator
-from olmo_core.optim.muon import MuonAdjustLRStrategy, MuonConfig
+from olmo_core.model_ladder import (
+    DeviceMeshSpec,
+    ModelLadder,
+    Olmo3ModelConfigurator,
+    TransformerSize,
+    WSDSChinchillaRunConfigurator,
+)
 from olmo_core.nn.attention import (
     GateConfig,
     GateGranularity,
@@ -23,6 +26,7 @@ from olmo_core.nn.attention import (
 )
 from olmo_core.nn.fla import FLAConfig
 from olmo_core.nn.transformer import TransformerBlockType
+from olmo_core.optim.muon import MuonAdjustLRStrategy, MuonConfig
 from olmo_core.train import prepare_training_environment, teardown_training_environment
 
 # This ladder has been run under the names:

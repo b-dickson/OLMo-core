@@ -409,10 +409,16 @@ class CosWithWarmdown(Scheduler):
         if self.warmup is None and self.warmup_fraction is None:
             self.warmup_fraction = 0.0
 
-        if self.warmup is not None and self.warmup_fraction is not None and self.warmup_fraction != 0.0:
+        if (
+            self.warmup is not None
+            and self.warmup_fraction is not None
+            and self.warmup_fraction != 0.0
+        ):
             raise OLMoConfigurationError("Specify either 'warmup' or 'warmup_fraction', not both.")
 
-        if self.warmup_fraction is not None and (self.warmup_fraction < 0 or self.warmup_fraction > 1):
+        if self.warmup_fraction is not None and (
+            self.warmup_fraction < 0 or self.warmup_fraction > 1
+        ):
             raise OLMoConfigurationError("'warmup_fraction' must be between 0 and 1.")
 
         if self.warmdown_fraction < 0 or self.warmdown_fraction > 1:
@@ -438,7 +444,10 @@ class CosWithWarmdown(Scheduler):
             return self.warmdown_min_lr
         else:
             progress = (current - warmdown_start) / (t_max - warmdown_start)
-            return self.warmdown_min_lr + (initial_lr - self.warmdown_min_lr) * (1 + cos(pi * progress)) / 2
+            return (
+                self.warmdown_min_lr
+                + (initial_lr - self.warmdown_min_lr) * (1 + cos(pi * progress)) / 2
+            )
 
 
 @dataclass

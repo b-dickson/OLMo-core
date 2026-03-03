@@ -13,9 +13,10 @@ When training, set mix_base_dir to your output_dir.
 
 import argparse
 import os
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import requests
 
 # Constants
 BASE_URL = "https://olmo-data.org"
@@ -24,16 +25,40 @@ TOKENIZER = "dolma2-tokenizer"  # For v3_small_ppl_validation with dolma2 tokeni
 # Eval datasets from v3-small-ppl-validation.txt
 EVAL_DATASETS = [
     ("c4_en-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/c4_en/val/part-0-00000.npy"),
-    ("dolma_books-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_books/val/part-0-00000.npy"),
-    ("dolma_common-crawl-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_common-crawl/val/part-0-00000.npy"),
-    ("dolma_pes2o-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_pes2o/val/part-0-00000.npy"),
-    ("dolma_reddit-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_reddit/val/part-0-00000.npy"),
-    ("dolma_stack-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_stack/val/part-0-00000.npy"),
-    ("dolma_wiki-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_wiki/val/part-0-00000.npy"),
+    (
+        "dolma_books-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_books/val/part-0-00000.npy",
+    ),
+    (
+        "dolma_common-crawl-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_common-crawl/val/part-0-00000.npy",
+    ),
+    (
+        "dolma_pes2o-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_pes2o/val/part-0-00000.npy",
+    ),
+    (
+        "dolma_reddit-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_reddit/val/part-0-00000.npy",
+    ),
+    (
+        "dolma_stack-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_stack/val/part-0-00000.npy",
+    ),
+    (
+        "dolma_wiki-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/dolma_wiki/val/part-0-00000.npy",
+    ),
     ("ice-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/ice/val/part-0-00000.npy"),
-    ("m2d2_s2orc-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/m2d2_s2orc/val/part-0-00000.npy"),
+    (
+        "m2d2_s2orc-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/m2d2_s2orc/val/part-0-00000.npy",
+    ),
     ("pile-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/pile/val/part-0-00000.npy"),
-    ("wikitext_103-validation", f"eval-data/perplexity/v3_small_{TOKENIZER}/wikitext_103/val/part-0-00000.npy"),
+    (
+        "wikitext_103-validation",
+        f"eval-data/perplexity/v3_small_{TOKENIZER}/wikitext_103/val/part-0-00000.npy",
+    ),
 ]
 
 
@@ -45,8 +70,8 @@ def download_file(url: str, output_path: Path, timeout: int = 300) -> tuple[bool
         r = requests.get(url, timeout=timeout, stream=True)
         r.raise_for_status()
 
-        tmp_path = output_path.with_suffix('.tmp')
-        with open(tmp_path, 'wb') as f:
+        tmp_path = output_path.with_suffix(".tmp")
+        with open(tmp_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
         tmp_path.rename(output_path)
@@ -58,12 +83,18 @@ def download_file(url: str, output_path: Path, timeout: int = 300) -> tuple[bool
 
 def main():
     parser = argparse.ArgumentParser(description="Download OLMo PPL evaluation datasets")
-    parser.add_argument("--output-dir", type=str, required=True,
-                        help="Base directory to save data (will be your mix_base_dir)")
-    parser.add_argument("--num-workers", type=int, default=4,
-                        help="Number of parallel downloads (default: 4)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Show what would be downloaded without downloading")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Base directory to save data (will be your mix_base_dir)",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=4, help="Number of parallel downloads (default: 4)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be downloaded without downloading"
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)

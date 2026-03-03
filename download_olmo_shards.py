@@ -15,9 +15,10 @@ When training, set mix_base_dir to your output_dir.
 
 import argparse
 import os
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import requests
 
 # Constants
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,11 +33,11 @@ BYTES_PER_SHARD = 580_000_000  # ~580MB per shard
 def parse_num_params(s: str) -> int:
     """Parse parameter count from string like '1B', '1e9', '370M', etc."""
     s = s.strip().upper()
-    if s.endswith('B'):
+    if s.endswith("B"):
         return int(float(s[:-1]) * 1e9)
-    elif s.endswith('M'):
+    elif s.endswith("M"):
         return int(float(s[:-1]) * 1e6)
-    elif s.endswith('K'):
+    elif s.endswith("K"):
         return int(float(s[:-1]) * 1e3)
     else:
         return int(float(s))
@@ -48,9 +49,9 @@ def load_mix_paths(mix_file: str) -> list[tuple[str, str]]:
     with open(mix_file) as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#'):
+            if not line or line.startswith("#"):
                 continue
-            label, path = line.split(',')
+            label, path = line.split(",")
             paths.append((label, path))
     return paths
 
@@ -65,8 +66,8 @@ def download_shard(url: str, output_path: Path, timeout: int = 600) -> tuple[boo
         r.raise_for_status()
 
         # Write to temp file first, then rename
-        tmp_path = output_path.with_suffix('.tmp')
-        with open(tmp_path, 'wb') as f:
+        tmp_path = output_path.with_suffix(".tmp")
+        with open(tmp_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
         tmp_path.rename(output_path)
@@ -78,18 +79,28 @@ def download_shard(url: str, output_path: Path, timeout: int = 600) -> tuple[boo
 
 def main():
     parser = argparse.ArgumentParser(description="Download OLMo pre-tokenized shards")
-    parser.add_argument("--output-dir", type=str, required=True,
-                        help="Base directory to save shards (will be your mix_base_dir)")
-    parser.add_argument("--num-params", type=str, required=True,
-                        help="Number of parameters (e.g., '1B', '370M', '1e9')")
-    parser.add_argument("--chinchilla-mult", type=float, default=4.0,
-                        help="Chinchilla multiple (default: 4.0)")
-    parser.add_argument("--num-workers", type=int, default=4,
-                        help="Number of parallel downloads (default: 4)")
-    parser.add_argument("--mix-file", type=str, default=MIX_FILE,
-                        help="Path to mix file")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Show what would be downloaded without downloading")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Base directory to save shards (will be your mix_base_dir)",
+    )
+    parser.add_argument(
+        "--num-params",
+        type=str,
+        required=True,
+        help="Number of parameters (e.g., '1B', '370M', '1e9')",
+    )
+    parser.add_argument(
+        "--chinchilla-mult", type=float, default=4.0, help="Chinchilla multiple (default: 4.0)"
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=4, help="Number of parallel downloads (default: 4)"
+    )
+    parser.add_argument("--mix-file", type=str, default=MIX_FILE, help="Path to mix file")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be downloaded without downloading"
+    )
     args = parser.parse_args()
 
     # Calculate requirements
@@ -125,7 +136,7 @@ def main():
     missing = []
     for label, path in paths_to_use:
         # Replace {TOKENIZER} placeholder and preserve full path
-        resolved_path = path.replace('{TOKENIZER}', TOKENIZER)
+        resolved_path = path.replace("{TOKENIZER}", TOKENIZER)
         output_path = output_dir / resolved_path
         if output_path.exists():
             existing.append((label, path, output_path))
