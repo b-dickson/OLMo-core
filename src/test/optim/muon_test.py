@@ -1,3 +1,5 @@
+from collections import Counter
+
 import pytest
 import torch
 
@@ -6,9 +8,10 @@ from olmo_core.distributed.checkpoint import (
     save_model_and_optim_state,
 )
 from olmo_core.distributed.parallel import DataParallelType, build_world_mesh
+from olmo_core.nn.hyper_connections import IdentityHyperConnectionConfig
 from olmo_core.nn.transformer.config import TransformerConfig
 from olmo_core.nn.transformer.model import Transformer
-from olmo_core.optim.muon import MuonConfig
+from olmo_core.optim.muon import MuonConfig, _patch_dion_adamw_update_foreach_hc_split
 from olmo_core.testing import DEVICES, requires_multi_gpu, run_distributed_test
 from olmo_core.testing.utils import requires_dion
 from olmo_core.train.train_module.transformer.common import parallelize_model
@@ -37,6 +40,198 @@ def test_muon_config_to_optim():
     assert len(optim.param_groups) == 4  # emb, matrix, vector, lm_head
 
     assert config.merge(["lr=1e-1"]).lr == 0.1
+
+
+@requires_dion
+def test_muon_patch_only_enabled_for_hc(monkeypatch):
+    patch_calls: list[set[int]] = []
+
+    def _count_patch_calls(hc_vector_sizes: set[int]) -> None:
+        patch_calls.append(set(hc_vector_sizes))
+
+    monkeypatch.setattr(
+        "olmo_core.optim.muon._patch_dion_adamw_update_foreach_hc_split",
+        _count_patch_calls,
+    )
+
+    # No HC => no Dion patch call.
+    model = build_transformer_model()
+    _ = MuonConfig().build(model)
+    assert patch_calls == []
+
+    # HC enabled => patch is installed with model n_streams size.
+    hc_model_config = TransformerConfig.olmo2_30M(vocab_size=1024, n_layers=2)
+    hc_model_config.hyper_connections = IdentityHyperConnectionConfig(n_streams=4)
+    hc_model = hc_model_config.build()
+    _ = MuonConfig().build(hc_model)
+    assert patch_calls == [{4}]
+
+    hc8_model_config = TransformerConfig.olmo2_30M(vocab_size=1024, n_layers=2)
+    hc8_model_config.hyper_connections = IdentityHyperConnectionConfig(n_streams=8)
+    hc8_model = hc8_model_config.build()
+    _ = MuonConfig().build(hc8_model)
+    assert patch_calls == [{4}, {8}]
+
+
+@requires_dion
+def test_muon_dion_adamw_foreach_hc_split_dispatch(monkeypatch):
+    from dion import muon as dion_muon  # type: ignore[reportMissingImports]
+    from dion import scalar_opts  # type: ignore[reportMissingImports]
+
+    calls = {"compiled": [], "eager": []}
+
+    def _compiled_foreach(
+        X,
+        G,
+        M,
+        V,
+        lr,
+        beta1,
+        beta2,
+        weight_decay,
+        step,
+        epsilon,
+        cautious_wd=False,
+    ):
+        del G, M, V, lr, beta1, beta2, weight_decay, step, epsilon, cautious_wd
+        calls["compiled"].append([tuple(t.shape) for t in X])
+
+    def _eager_foreach(
+        X,
+        G,
+        M,
+        V,
+        lr,
+        beta1,
+        beta2,
+        weight_decay,
+        step,
+        epsilon,
+        cautious_wd=False,
+    ):
+        del G, M, V, lr, beta1, beta2, weight_decay, step, epsilon, cautious_wd
+        calls["eager"].append([tuple(t.shape) for t in X])
+
+    _compiled_foreach._torchdynamo_orig_callable = _eager_foreach  # type: ignore[attr-defined]
+    monkeypatch.setattr(scalar_opts, "adamw_update_foreach", _compiled_foreach)
+    monkeypatch.delattr(scalar_opts, "_olmo_core_hc_foreach_split_installed", raising=False)
+
+    _patch_dion_adamw_update_foreach_hc_split({4})
+    wrapped_foreach_once = scalar_opts.adamw_update_foreach
+    wrapped_async_once = dion_muon.adamw_update_foreach_async
+    _patch_dion_adamw_update_foreach_hc_split({4})
+    assert scalar_opts.adamw_update_foreach is wrapped_foreach_once
+    assert scalar_opts.adamw_update_foreach_async is wrapped_async_once
+    assert dion_muon.adamw_update_foreach_async is wrapped_async_once
+
+    params = [
+        torch.randn(4),  # HC-like: should go eager
+        torch.randn(8),  # non-HC: should stay compiled
+        torch.randn(2, 2),  # numel=4 but not vector, should stay compiled
+        torch.randn(4),  # HC-like: should go eager
+    ]
+    grads = [torch.randn_like(p) for p in params]
+    momentums = [torch.zeros_like(p) for p in params]
+    variances = [torch.zeros_like(p) for p in params]
+
+    list(
+        dion_muon.adamw_update_foreach_async(
+            params,
+            grads,
+            momentums,
+            variances,
+            torch.tensor(1e-3),
+            torch.tensor(0.9),
+            torch.tensor(0.95),
+            torch.tensor(0.1),
+            torch.tensor(1),
+            torch.tensor(1e-8),
+            False,
+        )
+    )
+
+    compiled_shapes = [shape for call_shapes in calls["compiled"] for shape in call_shapes]
+    eager_shapes = [shape for call_shapes in calls["eager"] for shape in call_shapes]
+    assert Counter(compiled_shapes) == Counter({(8,): 1, (2, 2): 1})
+    assert Counter(eager_shapes) == Counter({(4,): 2})
+
+
+@requires_dion
+def test_muon_dion_adamw_foreach_hc_split_fallback_only_for_failing_signature(monkeypatch):
+    from dion import muon as dion_muon  # type: ignore[reportMissingImports]
+    from dion import scalar_opts  # type: ignore[reportMissingImports]
+
+    calls = {"compiled": [], "eager": []}
+
+    def _compiled_foreach(
+        X,
+        G,
+        M,
+        V,
+        lr,
+        beta1,
+        beta2,
+        weight_decay,
+        step,
+        epsilon,
+        cautious_wd=False,
+    ):
+        del G, M, V, lr, beta1, beta2, weight_decay, step, epsilon, cautious_wd
+        shapes = [tuple(t.shape) for t in X]
+        calls["compiled"].append(shapes)
+        if shapes and shapes[0] == (8,):
+            raise RuntimeError("InductorError: AssertionError in fuse_nodes SchedulerNode")
+
+    def _eager_foreach(
+        X,
+        G,
+        M,
+        V,
+        lr,
+        beta1,
+        beta2,
+        weight_decay,
+        step,
+        epsilon,
+        cautious_wd=False,
+    ):
+        del G, M, V, lr, beta1, beta2, weight_decay, step, epsilon, cautious_wd
+        calls["eager"].append([tuple(t.shape) for t in X])
+
+    _compiled_foreach._torchdynamo_orig_callable = _eager_foreach  # type: ignore[attr-defined]
+    monkeypatch.setattr(scalar_opts, "adamw_update_foreach", _compiled_foreach)
+    monkeypatch.delattr(scalar_opts, "_olmo_core_hc_foreach_split_installed", raising=False)
+
+    _patch_dion_adamw_update_foreach_hc_split({4})
+
+    def _step_once() -> None:
+        params = [torch.randn(8), torch.randn(16)]
+        grads = [torch.randn_like(p) for p in params]
+        momentums = [torch.zeros_like(p) for p in params]
+        variances = [torch.zeros_like(p) for p in params]
+        list(
+            dion_muon.adamw_update_foreach_async(
+                params,
+                grads,
+                momentums,
+                variances,
+                torch.tensor(1e-3),
+                torch.tensor(0.9),
+                torch.tensor(0.95),
+                torch.tensor(0.1),
+                torch.tensor(1),
+                torch.tensor(1e-8),
+                False,
+            )
+        )
+
+    _step_once()
+    _step_once()
+
+    compiled_shapes = [shape for call_shapes in calls["compiled"] for shape in call_shapes]
+    eager_shapes = [shape for call_shapes in calls["eager"] for shape in call_shapes]
+    assert Counter(compiled_shapes) == Counter({(8,): 1, (16,): 2})
+    assert Counter(eager_shapes) == Counter({(8,): 2})
 
 
 @requires_dion

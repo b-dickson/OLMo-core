@@ -21,6 +21,231 @@ from .config import MatrixAwareOptimConfig, OptimConfig, OptimGroupOverride
 log = logging.getLogger(__name__)
 
 
+def _is_hc_vector_for_adamw_foreach(
+    t: torch.Tensor, hc_vector_sizes: set[int]
+) -> bool:
+    """
+    Heuristic for HC scalar vectors inside Dion's AdamW foreach path.
+    """
+    return t.ndim == 1 and t.numel() in hc_vector_sizes
+
+
+def _get_hc_vector_sizes(model: torch.nn.Module) -> set[int]:
+    sizes: set[int] = set()
+    # Fast path for unwrapped Transformer models.
+    if isinstance(model, Transformer):
+        n_streams = int(getattr(model, "_hc_n_streams", 0))
+        if n_streams > 0:
+            sizes.add(n_streams)
+
+    # Fallback for wrapped models (FSDP/HSDP/etc.): inspect parameter names.
+    for name, param in model.named_parameters():
+        if not (name.endswith(".h_pre") or name.endswith(".h_post")):
+            continue
+        if param.ndim == 1 and param.numel() > 0:
+            sizes.add(param.numel())
+    return sizes
+
+
+def _select_tensors(tensors: list[torch.Tensor], indices: list[int]) -> list[torch.Tensor]:
+    return [tensors[i] for i in indices]
+
+
+def _adamw_foreach_signature(t: torch.Tensor) -> tuple[tuple[int, ...], torch.dtype]:
+    return (tuple(t.shape), t.dtype)
+
+
+def _is_inductor_compile_failure(exc: Exception) -> bool:
+    cur: BaseException | None = exc
+    while cur is not None:
+        msg = f"{type(cur).__name__}: {cur}"
+        if any(
+            token in msg
+            for token in (
+                "InductorError",
+                "BackendCompilerFailed",
+                "torch._inductor",
+                "SchedulerNode",
+                "fuse_nodes",
+            )
+        ):
+            return True
+        cur = cur.__cause__ if cur.__cause__ is not None else cur.__context__
+    return False
+
+
+def _patch_dion_adamw_update_foreach_hc_split(hc_vector_sizes: set[int]) -> None:
+    """
+    Keep Dion's compiled AdamW foreach path for most tensors, while routing HC vectors
+    (1D tensors with stream-size elements) through eager mode to avoid known Inductor
+    fusion failures.
+    """
+    if not hc_vector_sizes:
+        return
+
+    from dion import muon as dion_muon  # type: ignore
+    from dion import scalar_opts as dion_scalar_opts  # type: ignore
+
+    try:
+        from dion import normuon as dion_normuon  # type: ignore
+    except ImportError:
+        dion_normuon = None
+
+    if getattr(dion_scalar_opts, "_olmo_core_hc_foreach_split_installed", False):
+        current_hc_vector_sizes = getattr(dion_scalar_opts, "_olmo_core_hc_foreach_split_sizes", None)
+        if current_hc_vector_sizes is None:
+            dion_scalar_opts._olmo_core_hc_foreach_split_sizes = set(hc_vector_sizes)
+        else:
+            current_hc_vector_sizes.update(hc_vector_sizes)
+        return
+
+    compiled_foreach = dion_scalar_opts.adamw_update_foreach
+    eager_foreach = getattr(compiled_foreach, "_torchdynamo_orig_callable", compiled_foreach)
+    hc_vector_sizes_live = set(hc_vector_sizes)
+    force_eager_signatures: set[tuple[tuple[int, ...], torch.dtype]] = set()
+
+    def _adamw_update_foreach_hc_split(
+        X: list[torch.Tensor],
+        G: list[torch.Tensor],
+        M: list[torch.Tensor],
+        V: list[torch.Tensor],
+        lr: torch.Tensor,
+        beta1: torch.Tensor,
+        beta2: torch.Tensor,
+        weight_decay: torch.Tensor,
+        step: torch.Tensor,
+        epsilon: torch.Tensor,
+        cautious_wd: bool = False,
+    ) -> None:
+        assert len(X) == len(G)
+        assert len(X) == len(M)
+        assert len(X) == len(V)
+        if not X:
+            return
+
+        hc_indices: list[int] = []
+        non_hc_indices: list[int] = []
+        for idx, param in enumerate(X):
+            if _is_hc_vector_for_adamw_foreach(param, hc_vector_sizes_live):
+                hc_indices.append(idx)
+            else:
+                non_hc_indices.append(idx)
+
+        non_hc_indices_by_signature: dict[tuple[tuple[int, ...], torch.dtype], list[int]] = {}
+        for idx in non_hc_indices:
+            signature = _adamw_foreach_signature(X[idx])
+            non_hc_indices_by_signature.setdefault(signature, []).append(idx)
+
+        for signature, indices in non_hc_indices_by_signature.items():
+            x_subset = _select_tensors(X, indices)
+            g_subset = _select_tensors(G, indices)
+            m_subset = _select_tensors(M, indices)
+            v_subset = _select_tensors(V, indices)
+            if signature in force_eager_signatures:
+                eager_foreach(
+                    x_subset,
+                    g_subset,
+                    m_subset,
+                    v_subset,
+                    lr,
+                    beta1,
+                    beta2,
+                    weight_decay,
+                    step,
+                    epsilon,
+                    cautious_wd,
+                )
+                continue
+            try:
+                compiled_foreach(
+                    x_subset,
+                    g_subset,
+                    m_subset,
+                    v_subset,
+                    lr,
+                    beta1,
+                    beta2,
+                    weight_decay,
+                    step,
+                    epsilon,
+                    cautious_wd,
+                )
+            except Exception as e:
+                if not _is_inductor_compile_failure(e):
+                    raise
+                force_eager_signatures.add(signature)
+                log.warning(
+                    "Falling back to eager Dion AdamW foreach for signature %s after compile failure: %s",
+                    signature,
+                    type(e).__name__,
+                )
+                eager_foreach(
+                    x_subset,
+                    g_subset,
+                    m_subset,
+                    v_subset,
+                    lr,
+                    beta1,
+                    beta2,
+                    weight_decay,
+                    step,
+                    epsilon,
+                    cautious_wd,
+                )
+
+        if hc_indices:
+            eager_foreach(
+                _select_tensors(X, hc_indices),
+                _select_tensors(G, hc_indices),
+                _select_tensors(M, hc_indices),
+                _select_tensors(V, hc_indices),
+                lr,
+                beta1,
+                beta2,
+                weight_decay,
+                step,
+                epsilon,
+                cautious_wd,
+            )
+
+    def _adamw_update_foreach_async_hc_split(
+        X: list[torch.Tensor],
+        G: list[torch.Tensor],
+        M: list[torch.Tensor],
+        V: list[torch.Tensor],
+        lr: torch.Tensor,
+        beta1: torch.Tensor,
+        beta2: torch.Tensor,
+        weight_decay: torch.Tensor,
+        step: torch.Tensor,
+        epsilon: torch.Tensor,
+        cautious_wd: bool = False,
+    ):
+        _adamw_update_foreach_hc_split(
+            X,
+            G,
+            M,
+            V,
+            lr,
+            beta1,
+            beta2,
+            weight_decay,
+            step,
+            epsilon,
+            cautious_wd,
+        )
+        yield
+
+    dion_scalar_opts.adamw_update_foreach = _adamw_update_foreach_hc_split
+    dion_scalar_opts.adamw_update_foreach_async = _adamw_update_foreach_async_hc_split
+    # Muon imports adamw_update_foreach_async into module scope, so patch that symbol too.
+    dion_muon.adamw_update_foreach_async = _adamw_update_foreach_async_hc_split
+    if dion_normuon is not None:
+        dion_normuon.adamw_update_foreach_async = _adamw_update_foreach_async_hc_split
+    dion_scalar_opts._olmo_core_hc_foreach_split_sizes = hc_vector_sizes_live
+    dion_scalar_opts._olmo_core_hc_foreach_split_installed = True
+
+
 def _import_dion():
     try:
         from dion import Muon, NorMuon  # type: ignore
@@ -226,6 +451,11 @@ class MuonConfig(MatrixAwareOptimConfig):
 
         # Filter out config fields that are used for group overrides but not passed to optimizer
         muon_kwargs = {k: v for k, v in kwargs.items() if k not in ("embed_lr", "lm_head_lr")}
+
+        # Keep regular Muon behavior untouched unless the model actually uses hyper-connections.
+        hc_vector_sizes = _get_hc_vector_sizes(model)
+        if hc_vector_sizes:
+            _patch_dion_adamw_update_foreach_hc_split(hc_vector_sizes)
 
         parallelism_config = self.build_parallelism_config()
         optim = self.optimizer()(
