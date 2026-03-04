@@ -523,12 +523,13 @@ class TransformerConfig(ModelConfig):
         # LM head.
         num_params += self.lm_head.num_params(self.d_model, self.vocab_size)
 
-        # Hyper connection parameters: 2 vectors (h_pre, h_post) per sublayer, 2 sublayers per block.
+        # Hyper connection parameters per sublayer:
+        #   phi.weight: (2*n, n*d_model), bias: 2*n, alpha_pre: 1, alpha_post: 1
         if self.hyper_connections is not None:
+            n = self.hyper_connections.n_streams
             num_sublayers_per_block = 2
-            num_params += (
-                self.n_layers * num_sublayers_per_block * 2 * self.hyper_connections.n_streams
-            )
+            per_sublayer = 2 * n * n * self.d_model + 2 * n + 2
+            num_params += self.n_layers * num_sublayers_per_block * per_sublayer
 
         return num_params
 
@@ -553,10 +554,10 @@ class TransformerConfig(ModelConfig):
 
         # Hyper connection parameters (always active).
         if self.hyper_connections is not None:
+            n = self.hyper_connections.n_streams
             num_sublayers_per_block = 2
-            num_active_params += (
-                self.n_layers * num_sublayers_per_block * 2 * self.hyper_connections.n_streams
-            )
+            per_sublayer = 2 * n * n * self.d_model + 2 * n + 2
+            num_active_params += self.n_layers * num_sublayers_per_block * per_sublayer
 
         return num_active_params
 

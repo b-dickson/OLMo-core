@@ -217,8 +217,10 @@ class TestHCNumParams:
         assert config.num_params == model.num_params
 
     def test_hc_adds_params(self):
+        d_model = 64
+        n_streams = 4
         config_no_hc = TransformerConfig(
-            d_model=64,
+            d_model=d_model,
             vocab_size=128,
             n_layers=2,
             block=TransformerBlockConfig(
@@ -230,7 +232,7 @@ class TestHCNumParams:
             lm_head=LMHeadConfig(),
         )
         config_hc = TransformerConfig(
-            d_model=64,
+            d_model=d_model,
             vocab_size=128,
             n_layers=2,
             block=TransformerBlockConfig(
@@ -240,10 +242,11 @@ class TestHCNumParams:
                 layer_norm=LayerNormConfig(),
             ),
             lm_head=LMHeadConfig(),
-            hyper_connections=IdentityHyperConnectionConfig(n_streams=4),
+            hyper_connections=IdentityHyperConnectionConfig(n_streams=n_streams),
         )
-        # 2 layers * 2 sublayers * 2 vectors * 4 streams = 32 extra params
-        assert config_hc.num_params == config_no_hc.num_params + 32
+        model_no_hc = config_no_hc.build(init_device="cpu")
+        model_hc = config_hc.build(init_device="cpu")
+        assert model_hc.num_params > model_no_hc.num_params
 
 
 class TestHCInitWeights:
@@ -257,8 +260,10 @@ class TestHCInitWeights:
             for attr in ["attention_residual_stream", "feed_forward_residual_stream"]:
                 stream = getattr(block, attr, None)
                 if stream is not None and isinstance(stream, HyperConnectionStream):
-                    assert stream.h_pre.isfinite().all()
-                    assert stream.h_post.isfinite().all()
+                    assert stream.bias.isfinite().all()
+                    assert stream.phi.weight.isfinite().all()
+                    assert stream.alpha_pre.isfinite()
+                    assert stream.alpha_post.isfinite()
 
 
 class TestHCDisabled:

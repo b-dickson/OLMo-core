@@ -87,6 +87,7 @@ def _apply_hyper_connections(
     block: TransformerBlockBase,
     hc_config: IdentityHyperConnectionConfig,
     block_idx: int,
+    d_model: int,
 ) -> None:
     """
     Replace :class:`ResidualStream` modules in *block* with :class:`HyperConnectionStream` instances.
@@ -111,7 +112,7 @@ def _apply_hyper_connections(
                 attr,
                 HyperConnectionStream(
                     n_streams=hc_config.n_streams,
-                    init_strategy=hc_config.init_strategy,
+                    d_model=d_model,
                     sublayer_idx=sublayer_idx,
                 ),
             )
@@ -202,12 +203,12 @@ class Transformer(nn.Module):
         # Apply hyper connections (replace ResidualStream -> HyperConnectionStream in blocks).
         if hyper_connections is not None:
             self._hc_n_streams = hyper_connections.n_streams
-            self._hc_init_strategy = hyper_connections.init_strategy
             for blk_idx, blk in enumerate(self.blocks.values()):
-                _apply_hyper_connections(blk, hyper_connections, block_idx=blk_idx)
+                _apply_hyper_connections(
+                    blk, hyper_connections, block_idx=blk_idx, d_model=d_model
+                )
         else:
             self._hc_n_streams = 0
-            self._hc_init_strategy = ""
 
         self.init_device = init_device
         self.init_method = InitMethod(init_method)
@@ -398,37 +399,22 @@ class Transformer(nn.Module):
                 generator=generator,
             )
 
-        # HC output scaling on sublayer output weights.
-        # See Hyper-Connections paper (Zhu et al., ICLR 2025), Section 3.3.
-        #
-        # With round-robin init, each sublayer reads from one stream and writes to all.
-        # At the final sum across n streams, each stream has ~(L/n) contributions (where
-        # L = total sublayers). The paper scales output by sqrt(n) to compensate for the
-        # reduced per-stream signal.
-        #
-        # With broadcast init, all streams are identical and summing them amplifies by n,
-        # so we scale by 1/sqrt(n) to compensate.
+        # Scale sublayer output weights by √n for hyper connections.
+        # Per the HC paper: "we scale the std of the weights by a factor of √n,
+        # where n represents the expansion rate."
         if self._hc_n_streams > 0:
-            if self._hc_init_strategy == "broadcast":
-                scale = 1.0 / math.sqrt(self._hc_n_streams)
-            else:
-                # round_robin / one_hot: paper's scaling
-                scale = math.sqrt(self._hc_n_streams)
+            scale = math.sqrt(self._hc_n_streams)
             for block in self.blocks.values():
                 if isinstance(block, FLABlock):
-                    # Scale FLA output projection.
-                    if hasattr(block.fla.inner, "o_proj"):
-                        block.fla.inner.o_proj.weight.mul_(scale)
-                    # Scale FFN w2 (down-projection).
-                    if hasattr(block, "feed_forward") and block.feed_forward is not None:
-                        block.feed_forward.w2.weight.mul_(scale)
-                elif isinstance(block, TransformerBlock):
-                    # Scale attention output projection.
+                    block = cast(FLABlock, block)
+                    if hasattr(block.fla, "inner") and hasattr(block.fla.inner, "o_proj"):
+                        block.fla.inner.o_proj.weight.data.mul_(scale)
+                else:
+                    block = cast(TransformerBlock, block)
                     att = cast(Union[Attention, FusedAttention], block.attention)
-                    att.w_out.weight.mul_(scale)
-                    # Scale FFN w2 (down-projection).
-                    if block.feed_forward is not None:
-                        block.feed_forward.w2.weight.mul_(scale)
+                    att.w_out.weight.data.mul_(scale)
+                if hasattr(block, "feed_forward") and block.feed_forward is not None:
+                    block.feed_forward.w2.weight.data.mul_(scale)
 
         return generator
 

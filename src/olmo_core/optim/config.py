@@ -254,15 +254,16 @@ class MatrixAwareOptimConfig(OptimConfig, Generic[Opt]):
             f"lm_head.{n}" for n, p in model.lm_head.named_parameters() if p.ndim == 2
         ]
 
-        # Separate HC static params (h_pre, h_post) — these need weight_decay=0
-        # per the Hyper-Connections paper (Zhu et al., ICLR 2025).
+        # Separate HC scalar/vector params (bias, alpha_pre, alpha_post) into their own
+        # group with weight_decay=0. The phi.weight (2D) stays in matrix_params for Muon.
         hc_param_names: Set[str] = set()
         for block_name, block in model.blocks.items():
             for mod_name, mod in block.named_modules():
                 if isinstance(mod, HyperConnectionStream):
-                    for p_name, _ in mod.named_parameters():
-                        full = f"blocks.{block_name}.{mod_name}.{p_name}"
-                        hc_param_names.add(full)
+                    for p_name, p in mod.named_parameters():
+                        if p.ndim < 2:  # bias, alpha_pre, alpha_post (not phi.weight)
+                            full = f"blocks.{block_name}.{mod_name}.{p_name}"
+                            hc_param_names.add(full)
         if hc_param_names:
             vector_params = [p for p in vector_params if p not in hc_param_names]
 
