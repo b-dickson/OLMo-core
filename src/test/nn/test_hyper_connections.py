@@ -91,11 +91,34 @@ class TestResidualStreamMerge:
         assert out is x
 
 
+class TestRoundRobinInit:
+    def test_round_robin_initialization(self):
+        """Each sublayer reads from a different stream (round-robin)."""
+        n = 4
+        for sublayer_idx in range(8):
+            hcs = HyperConnectionStream(n_streams=n, init_strategy="round_robin", sublayer_idx=sublayer_idx)
+            expected_pre = torch.zeros(n)
+            expected_pre[sublayer_idx % n] = 1.0
+            torch.testing.assert_close(hcs.h_pre, expected_pre)
+            torch.testing.assert_close(hcs.h_post, torch.ones(n))
+
+    def test_round_robin_merge_selects_stream(self):
+        """With round-robin init, merge selects exactly one stream."""
+        n = 4
+        B, S, d = 2, 16, 64
+        H = torch.randn(B, S, n, d)
+
+        for sublayer_idx in range(n):
+            hcs = HyperConnectionStream(n_streams=n, init_strategy="round_robin", sublayer_idx=sublayer_idx)
+            merged = hcs.merge(H)
+            torch.testing.assert_close(merged, H[..., sublayer_idx, :])
+
+
 class TestIdentityHyperConnectionConfig:
     def test_defaults(self):
         cfg = IdentityHyperConnectionConfig()
         assert cfg.n_streams == 4
-        assert cfg.init_strategy == "broadcast"
+        assert cfg.init_strategy == "round_robin"
 
     def test_custom(self):
         cfg = IdentityHyperConnectionConfig(n_streams=8, init_strategy="one_hot")

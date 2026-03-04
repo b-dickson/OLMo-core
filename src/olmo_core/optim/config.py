@@ -240,6 +240,8 @@ class MatrixAwareOptimConfig(OptimConfig, Generic[Opt]):
     def categorize_parameters(self, model: nn.Module) -> Dict[str, List[str]]:
         assert isinstance(model, Transformer)
 
+        from olmo_core.nn.hyper_connections import HyperConnectionStream
+
         embed_params = [
             f"embeddings.{n}" for n, p in model.embeddings.named_parameters() if p.ndim == 2
         ]
@@ -252,14 +254,30 @@ class MatrixAwareOptimConfig(OptimConfig, Generic[Opt]):
             f"lm_head.{n}" for n, p in model.lm_head.named_parameters() if p.ndim == 2
         ]
 
+        # Separate HC static params (h_pre, h_post) — these need weight_decay=0
+        # per the Hyper-Connections paper (Zhu et al., ICLR 2025).
+        hc_param_names: Set[str] = set()
+        for block_name, block in model.blocks.items():
+            for mod_name, mod in block.named_modules():
+                if isinstance(mod, HyperConnectionStream):
+                    for p_name, _ in mod.named_parameters():
+                        full = f"blocks.{block_name}.{mod_name}.{p_name}"
+                        hc_param_names.add(full)
+        if hc_param_names:
+            vector_params = [p for p in vector_params if p not in hc_param_names]
+
         # Assert all parameters are categorized
         all_model_params = {n for n, p in model.named_parameters() if p.requires_grad}
-        categorized_params = set(embed_params + matrix_params + vector_params + lm_head_params)
+        categorized_params = (
+            set(embed_params + matrix_params + vector_params + lm_head_params) | hc_param_names
+        )
         uncategorized = all_model_params - categorized_params
         assert not uncategorized, f"Uncategorized parameters: {uncategorized}"
 
         # Assert no params are in multiple categories
-        all_categorized = embed_params + matrix_params + vector_params + lm_head_params
+        all_categorized = (
+            embed_params + matrix_params + vector_params + lm_head_params + list(hc_param_names)
+        )
         assert len(all_categorized) == len(
             set(all_categorized)
         ), "Some parameters are in multiple categories"
@@ -269,6 +287,7 @@ class MatrixAwareOptimConfig(OptimConfig, Generic[Opt]):
             "matrix": matrix_params,
             "vector": vector_params,
             "lm_head": lm_head_params,
+            "hc_static": sorted(hc_param_names),
         }
 
     def default_group_overrides(self, model: nn.Module) -> List[OptimGroupOverride]:

@@ -21,9 +21,7 @@ from .config import MatrixAwareOptimConfig, OptimConfig, OptimGroupOverride
 log = logging.getLogger(__name__)
 
 
-def _is_hc_vector_for_adamw_foreach(
-    t: torch.Tensor, hc_vector_sizes: set[int]
-) -> bool:
+def _is_hc_vector_for_adamw_foreach(t: torch.Tensor, hc_vector_sizes: set[int]) -> bool:
     """
     Heuristic for HC scalar vectors inside Dion's AdamW foreach path.
     """
@@ -92,7 +90,9 @@ def _patch_dion_adamw_update_foreach_hc_split(hc_vector_sizes: set[int]) -> None
         dion_normuon = None
 
     if getattr(dion_scalar_opts, "_olmo_core_hc_foreach_split_installed", False):
-        current_hc_vector_sizes = getattr(dion_scalar_opts, "_olmo_core_hc_foreach_split_sizes", None)
+        current_hc_vector_sizes = getattr(
+            dion_scalar_opts, "_olmo_core_hc_foreach_split_sizes", None
+        )
         if current_hc_vector_sizes is None:
             dion_scalar_opts._olmo_core_hc_foreach_split_sizes = set(hc_vector_sizes)
         else:
@@ -355,7 +355,18 @@ class MuonConfig(MatrixAwareOptimConfig):
             lm_head_opts["lr"] = self.lm_head_lr
         lm_head_override = OptimGroupOverride(params=params["lm_head"], opts=lm_head_opts)
 
-        return [matrix_override, vector_override, embed_override, lm_head_override]
+        overrides = [matrix_override, vector_override, embed_override, lm_head_override]
+
+        # HC static params (h_pre, h_post) use AdamW with no weight decay,
+        # per the Hyper-Connections paper (Zhu et al., ICLR 2025).
+        if params.get("hc_static"):
+            hc_override = OptimGroupOverride(
+                params=params["hc_static"],
+                opts=dict(algorithm="adamw", weight_decay=0.0),
+            )
+            overrides.append(hc_override)
+
+        return overrides
 
     def build_groups(
         self, model: torch.nn.Module, strict: bool = True

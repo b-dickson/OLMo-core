@@ -1,4 +1,5 @@
 import logging
+import math
 from collections import defaultdict
 from functools import cached_property
 from typing import (
@@ -83,10 +84,15 @@ log = logging.getLogger(__name__)
 
 
 def _apply_hyper_connections(
-    block: TransformerBlockBase, hc_config: IdentityHyperConnectionConfig
+    block: TransformerBlockBase,
+    hc_config: IdentityHyperConnectionConfig,
+    block_idx: int,
 ) -> None:
     """
     Replace :class:`ResidualStream` modules in *block* with :class:`HyperConnectionStream` instances.
+
+    Each block has two sublayers (attention/FLA + FFN), so the global sublayer indices are
+    ``2 * block_idx`` and ``2 * block_idx + 1``.
     """
     rs_attr_pairs: list[str] = []
     if isinstance(block, TransformerBlock):
@@ -96,7 +102,8 @@ def _apply_hyper_connections(
         if block.ffn_residual_stream is not None:
             rs_attr_pairs.append("ffn_residual_stream")
 
-    for attr in rs_attr_pairs:
+    for sub_offset, attr in enumerate(rs_attr_pairs):
+        sublayer_idx = 2 * block_idx + sub_offset
         old_rs = getattr(block, attr, None)
         if old_rs is not None and isinstance(old_rs, ResidualStream):
             setattr(
@@ -105,6 +112,7 @@ def _apply_hyper_connections(
                 HyperConnectionStream(
                     n_streams=hc_config.n_streams,
                     init_strategy=hc_config.init_strategy,
+                    sublayer_idx=sublayer_idx,
                 ),
             )
 
@@ -194,10 +202,12 @@ class Transformer(nn.Module):
         # Apply hyper connections (replace ResidualStream -> HyperConnectionStream in blocks).
         if hyper_connections is not None:
             self._hc_n_streams = hyper_connections.n_streams
-            for blk in self.blocks.values():
-                _apply_hyper_connections(blk, hyper_connections)
+            self._hc_init_strategy = hyper_connections.init_strategy
+            for blk_idx, blk in enumerate(self.blocks.values()):
+                _apply_hyper_connections(blk, hyper_connections, block_idx=blk_idx)
         else:
             self._hc_n_streams = 0
+            self._hc_init_strategy = ""
 
         self.init_device = init_device
         self.init_method = InitMethod(init_method)
@@ -387,6 +397,38 @@ class Transformer(nn.Module):
                 std=self.init_std,
                 generator=generator,
             )
+
+        # HC output scaling on sublayer output weights.
+        # See Hyper-Connections paper (Zhu et al., ICLR 2025), Section 3.3.
+        #
+        # With round-robin init, each sublayer reads from one stream and writes to all.
+        # At the final sum across n streams, each stream has ~(L/n) contributions (where
+        # L = total sublayers). The paper scales output by sqrt(n) to compensate for the
+        # reduced per-stream signal.
+        #
+        # With broadcast init, all streams are identical and summing them amplifies by n,
+        # so we scale by 1/sqrt(n) to compensate.
+        if self._hc_n_streams > 0:
+            if self._hc_init_strategy == "broadcast":
+                scale = 1.0 / math.sqrt(self._hc_n_streams)
+            else:
+                # round_robin / one_hot: paper's scaling
+                scale = math.sqrt(self._hc_n_streams)
+            for block in self.blocks.values():
+                if isinstance(block, FLABlock):
+                    # Scale FLA output projection.
+                    if hasattr(block.fla.inner, "o_proj"):
+                        block.fla.inner.o_proj.weight.mul_(scale)
+                    # Scale FFN w2 (down-projection).
+                    if hasattr(block, "feed_forward") and block.feed_forward is not None:
+                        block.feed_forward.w2.weight.mul_(scale)
+                elif isinstance(block, TransformerBlock):
+                    # Scale attention output projection.
+                    att = cast(Union[Attention, FusedAttention], block.attention)
+                    att.w_out.weight.mul_(scale)
+                    # Scale FFN w2 (down-projection).
+                    if block.feed_forward is not None:
+                        block.feed_forward.w2.weight.mul_(scale)
 
         return generator
 
