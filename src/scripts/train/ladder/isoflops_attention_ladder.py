@@ -639,7 +639,7 @@ def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sliding-window-size",
         type=int,
-        default=1024,
+        default=4096,
         help="Sliding-window size for the local layers when attention-type=sliding_gated.",
     )
     parser.add_argument(

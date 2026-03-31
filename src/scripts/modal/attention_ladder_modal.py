@@ -483,7 +483,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--sliding-window-size",
         type=int,
-        default=1024,
+        default=4096,
         help="Sliding window size argument for ladder scripts.",
     )
     parser.add_argument(

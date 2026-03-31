@@ -35,7 +35,7 @@ fi
 DATA_DIR="${DATA_DIR:-/data/user/dicksonb/data/nanochat/tokenized/*.npy}"
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-/data/user/dicksonb/data}"
 SEQUENCE_LENGTH="${SEQUENCE_LENGTH:-2048}"
-SLIDING_WINDOW_SIZE="${SLIDING_WINDOW_SIZE:-1024}"
+SLIDING_WINDOW_SIZE="${SLIDING_WINDOW_SIZE:-4096}"
 
 # If the 4th token is numeric, treat it as sequence length; otherwise treat it as legacy
 # microbatch discount override.
