@@ -75,7 +75,7 @@ def add_additional_args(cmd: str, parser: argparse.ArgumentParser) -> None:
         "--attention-type",
         type=str,
         default="sliding_gated",
-        choices=["sliding_gated", "hybrid_gated_deltanet"],
+        choices=["sliding_gated", "hybrid_gated_deltanet", "vanilla"],
         help="Attention intervention to apply.",
     )
     parser.add_argument(
@@ -417,6 +417,10 @@ def _make_model_construction_kwargs(
         return dict(
             sliding_window=None,
             gate=GateConfig(granularity=GateGranularity.headwise),
+        )
+    elif attention_type == "vanilla":
+        return dict(
+            sliding_window=None,
         )
     raise ValueError(f"Unknown attention type: {attention_type}")
 
