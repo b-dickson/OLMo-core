@@ -1,0 +1,8 @@
+# attention-type size chinchilla_multiple sequence_length
+# Vanilla (full softmax) attention with headwise output gate + Identity Hyper-Connections (n_streams=4).
+# Every layer is full softmax over the full 8192-token sequence.
+# HC is set by the launcher (slurm passes --hyper-connections=4; modal --hyper-connections=4), not in this file.
+vanilla_gated 60M 4.0 8192
+vanilla_gated 100M 4.0 8192
+vanilla_gated 190M 4.0 8192
+vanilla_gated 370M 4.0 8192

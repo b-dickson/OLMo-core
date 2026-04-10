@@ -6,6 +6,7 @@ from pathlib import Path
 from olmo_core.aliases import PathOrStr
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.optim import (
+    LR_FIELD,
     WSDS,
     OptimConfig,
     OptimGroupOverride,
@@ -177,13 +178,16 @@ class WSDSChinchillaRunConfigurator(RunConfigurator):
         scheduler = self.configure_lr_scheduler(num_params, batch_size)
         warmup, chinchilla_periods = self.configure_chinchilla_periods(num_params)
         t_max = self.configure_duration(num_params, batch_size).value
+        # All concrete OptimConfig subclasses expose `lr`; the abstract base
+        # does not declare it as a field, so read it via getattr the same way
+        # OptimConfig itself does internally (see config.py).
+        base_lr: float = getattr(optim, LR_FIELD)
         tokens_seen = 0
         tokens = []
         lrs = []
         while tokens_seen <= t_max:
             tokens_seen += batch_size
-            assert isinstance(optim, SkipStepAdamWConfig)
-            lr = float(scheduler.get_lr(optim.lr, tokens_seen, t_max))
+            lr = float(scheduler.get_lr(base_lr, tokens_seen, t_max))
             tokens.append(tokens_seen)
             lrs.append(lr)
 
@@ -211,10 +215,9 @@ class WSDSChinchillaRunConfigurator(RunConfigurator):
             batch_size * (d.value // batch_size)
             for d, _ in self.configure_checkpoint_intervals(num_params, batch_size)
         ]
-        assert isinstance(optim, SkipStepAdamWConfig)
         plt.scatter(
             checkpoint_intervals,
-            [float(scheduler.get_lr(optim.lr, t, t_max)) for t in checkpoint_intervals],
+            [float(scheduler.get_lr(base_lr, t, t_max)) for t in checkpoint_intervals],
             color="green",
             label="Checkpoint",
         )

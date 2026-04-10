@@ -1,0 +1,8 @@
+# attention-type size chinchilla_multiple sequence_length
+# Hybrid GatedDeltaNet (linear attention) with headwise output gate. No hyper-connections.
+# Layer pattern is 3:1 GatedDeltaNet:full softmax per 4-layer block.
+# The 1/4 attention layers are full softmax over the 8192-token sequence.
+hybrid_gated_deltanet 60M 4.0 8192
+hybrid_gated_deltanet 100M 4.0 8192
+hybrid_gated_deltanet 190M 4.0 8192
+hybrid_gated_deltanet 370M 4.0 8192

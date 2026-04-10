@@ -1,0 +1,8 @@
+# attention-type size chinchilla_multiple sequence_length
+# Sliding-window softmax attention with headwise output gate. No hyper-connections.
+# Layer pattern is 3:1 sliding:full per 4-layer block (sliding window 4096, full attention 8192).
+# Last layer is forced to full attention. Sliding-window size set by launcher (--sliding-window-size=4096).
+sliding_gated 60M 4.0 8192
+sliding_gated 100M 4.0 8192
+sliding_gated 190M 4.0 8192
+sliding_gated 370M 4.0 8192

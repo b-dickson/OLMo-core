@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Modal launcher for WSDS and IsoFLOPs attention ladders.
+"""Modal launcher for the WSDS attention ladder.
 
 This intentionally mirrors the ``lair`` launch style:
 - read config rows from the existing ladder config files
@@ -29,12 +29,11 @@ try:
     REPO_ROOT = Path(__file__).resolve().parents[3]
 except IndexError:
     REPO_ROOT = Path("/repo/olmo-core")
-DEFAULT_WSDS_CONFIG = REPO_ROOT / "src/scripts/lair/attention_scaling_config.txt"
-DEFAULT_ISOFLOPS_CONFIG = REPO_ROOT / "src/scripts/lair/isoflops_attention_scaling_config.txt"
+DEFAULT_WSDS_CONFIG = REPO_ROOT / "src/scripts/lair/wsds_sliding_gated.txt"
 REMOTE_REPO_PATH = "/repo/olmo-core"
 REMOTE_LAUNCH_DIR = Path(REMOTE_REPO_PATH)
 REMOTE_EVAL_DATA_PATH = "/data/eval-data"
-LOCAL_EVAL_DATA_DIR = Path("/data/user/dicksonb/data/eval-data")
+LOCAL_EVAL_DATA_DIR = REPO_ROOT.parent / "datasets" / "eval-data"
 DEFAULT_SEQUENCE_LENGTH = 2048
 MODAL_SECRET_NAME = "r2-creds"
 app = modal.App("olmo-attn-ladders")
@@ -45,15 +44,6 @@ class WsdsConfigRow:
     attention_type: str
     size: str
     chinchilla_multiple: float
-    sequence_length: int | None
-    microbatch_discount: float | None
-
-
-@dataclass
-class IsoFlopsConfigRow:
-    attention_type: str
-    size: str
-    target_flops: float
     sequence_length: int | None
     microbatch_discount: float | None
 
@@ -162,8 +152,18 @@ _modal_image = (
     )
     .run_commands("pip install uv")
     .add_local_dir(str(REPO_ROOT), remote_path=REMOTE_REPO_PATH)
-    .add_local_dir(str(LOCAL_EVAL_DATA_DIR), remote_path=REMOTE_EVAL_DATA_PATH)
 )
+if LOCAL_EVAL_DATA_DIR.exists():
+    _modal_image = _modal_image.add_local_dir(
+        str(LOCAL_EVAL_DATA_DIR), remote_path=REMOTE_EVAL_DATA_PATH
+    )
+else:
+    print(
+        f"[WARN] Local eval-data dir {LOCAL_EVAL_DATA_DIR} not found; "
+        f"skipping mount. Real training runs will fail to read eval data, "
+        f"but dry-runs and remote-dry-runs will still work.",
+        file=sys.stderr,
+    )
 
 
 @app.function(
@@ -274,29 +274,6 @@ def load_wsds_rows(config_file: Path) -> list[WsdsConfigRow]:
     return rows
 
 
-def load_isoflops_rows(config_file: Path) -> list[IsoFlopsConfigRow]:
-    rows: list[IsoFlopsConfigRow] = []
-    for line in config_file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = re.split(r"\s+", line)
-        if len(parts) < 3:
-            raise ValueError(f"Malformed IsoFLOPs config line: {line}")
-        attention_type, size, target_flops = parts[:3]
-        seq_len, microbatch = _parse_tail_numbers(parts[3:])
-        rows.append(
-            IsoFlopsConfigRow(
-                attention_type=attention_type,
-                size=size,
-                target_flops=float(target_flops),
-                sequence_length=seq_len,
-                microbatch_discount=microbatch,
-            )
-        )
-    return rows
-
-
 def _build_wsds_command(
     row: WsdsConfigRow,
     args: argparse.Namespace,
@@ -316,10 +293,11 @@ def _build_wsds_command(
         if args.chinchilla_multiple is not None
         else row.chinchilla_multiple
     )
+    hc_prefix = f"hc{args.hyper_connections}-" if args.hyper_connections else ""
     run_name = (
         f"{args.run_name_prefix}-{task_id}"
         if args.run_name_prefix
-        else f"{row.attention_type}-{chinchilla_multiple}x-{row.size}_seq{sequence_length}_{task_id}"
+        else f"{hc_prefix}{row.attention_type}-{chinchilla_multiple}x-{row.size}_seq{sequence_length}_{task_id}"
     )
 
     command: list[str] = [
@@ -327,7 +305,7 @@ def _build_wsds_command(
         "--standalone",
         f"--nproc-per-node={args.gpus}",
         "src/scripts/train/ladder/wsds_attention_ladder.py",
-        "dry-run" if args.dry_run else "run",
+        "dry-run" if (args.dry_run or args.remote_dry_run) else "run",
         f"--name={run_name}",
         f"--size={row.size}",
         f"--attention-type={row.attention_type}",
@@ -349,50 +327,8 @@ def _build_wsds_command(
     if args.no_grad_accum:
         command.append("--no-grad-accum")
 
-    if args.dry_run and args.show_plot:
-        command.append("--show-plot")
-
-    return command, run_name
-
-
-def _build_isoflops_command(
-    row: IsoFlopsConfigRow,
-    args: argparse.Namespace,
-    task_id: int,
-) -> tuple[list[str], str]:
-    sequence_length = args.sequence_length or row.sequence_length or DEFAULT_SEQUENCE_LENGTH
-    microbatch_discount = (
-        args.microbatch_discount
-        if args.microbatch_discount is not None
-        else row.microbatch_discount
-        if row.microbatch_discount is not None
-        else 1.0
-    )
-    run_name = (
-        f"{args.run_name_prefix}-{task_id}"
-        if args.run_name_prefix
-        else f"{row.attention_type}-{row.size}-{row.target_flops:g}_seq{sequence_length}_{task_id}"
-    )
-
-    command: list[str] = [
-        "torchrun",
-        "--standalone",
-        f"--nproc-per-node={args.gpus}",
-        "src/scripts/train/ladder/isoflops_attention_ladder.py",
-        "dry-run" if args.dry_run else "run",
-        f"--name={run_name}",
-        f"--size={row.size}",
-        f"--attention-type={row.attention_type}",
-        f"--target-flops={row.target_flops}",
-        f"--microbatch-discount={microbatch_discount}",
-        f"--sequence-length={sequence_length}",
-        f"--sliding-window-size={args.sliding_window_size}",
-        f"--train-data={args.train_data}",
-        f"--eval-data-dir={args.eval_data_dir}",
-        f"--max-gpus={args.gpus}",
-        f"--wandb-entity={args.wandb_entity}",
-        f"--project={args.project}",
-    ]
+    if args.hyper_connections and args.hyper_connections > 0:
+        command.append(f"--hyper-connections={args.hyper_connections}")
 
     if args.dry_run and args.show_plot:
         command.append("--show-plot")
@@ -421,22 +357,19 @@ def _collect_passthrough_env() -> dict[str, str]:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Launch WSDS/IsoFLOPs ladder rows on Modal.")
-    parser.add_argument(
-        "--mode",
-        choices=["wsds", "isoflops"],
-        required=True,
-        help="Which ladder to run.",
-    )
+    parser = argparse.ArgumentParser(description="Launch WSDS attention-ladder rows on Modal.")
     parser.add_argument(
         "--array",
         default=None,
-        help="Array task indices, e.g. 1-12 or 1,3,7 (defaults to all).",
+        help="Array task indices, e.g. 1-4 or 1,3 (defaults to all rows in the config).",
     )
     parser.add_argument(
         "--config-file",
         default=None,
-        help="Path to ladder config file (defaults to attention_scaling_config.txt for wsds, isoflops_attention_scaling_config.txt for isoflops).",
+        help=(
+            "Path to a WSDS ladder config file (e.g. src/scripts/lair/wsds_sliding_gated.txt). "
+            "Defaults to wsds_sliding_gated.txt."
+        ),
     )
     parser.add_argument("--gpus", type=int, default=8, help="Number of GPUs for torchrun.")
     parser.add_argument("--gpu-type", default="H100", help="Modal GPU type (e.g. H100, B200).")
@@ -487,6 +420,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Sliding window size argument for ladder scripts.",
     )
     parser.add_argument(
+        "--hyper-connections",
+        type=int,
+        default=0,
+        help=(
+            "Number of Identity Hyper-Connection streams. 0 disables HC entirely "
+            "(use this for the non-HC variants). Set to 4 for the *_hc variants."
+        ),
+    )
+    parser.add_argument(
         "--optimizer",
         default="muon",
         help="WSDS optimizer override.",
@@ -508,6 +450,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Pass through dry-run instead of run.",
     )
     parser.add_argument(
+        "--remote-dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Submit to Modal but pass dry-run to the inner ladder script. "
+            "Pulls the image, mounts the repo, materializes the secret, and "
+            "exercises config-build (including R2 reads) without actually "
+            "training. Useful for end-to-end credential validation."
+        ),
+    )
+    parser.add_argument(
         "--no-grad-accum",
         action="store_true",
         default=False,
@@ -525,40 +478,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if args.project is None:
-        args.project = "attn-scaling-isoflops" if args.mode == "isoflops" else "attn-scaling-ladder"
+        args.project = "attn-scaling-ladder"
     env_vars = _collect_passthrough_env()
     if args.ladder_root_dir:
         env_vars["LADDER_ROOT_DIR"] = args.ladder_root_dir
     env_vars["FORCE_MIN_WORLD_SIZE"] = str(args.gpus)
 
-    if args.config_file:
-        config_path = Path(args.config_file)
-    elif args.mode == "wsds":
-        config_path = DEFAULT_WSDS_CONFIG
-    else:
-        config_path = DEFAULT_ISOFLOPS_CONFIG
-
-    if args.mode == "wsds":
-        rows = load_wsds_rows(config_path)
-    else:
-        rows = load_isoflops_rows(config_path)
+    config_path = Path(args.config_file) if args.config_file else DEFAULT_WSDS_CONFIG
+    rows = load_wsds_rows(config_path)
 
     task_ids = _parse_task_indices(args.array, len(rows))
     if not task_ids:
         raise SystemExit("No tasks selected.")
 
-    launch_fn = _build_wsds_command if args.mode == "wsds" else _build_isoflops_command
     handles = []
 
     if args.dry_run:
         print("Modal dry-run: no remote submission; commands below for inspection.")
 
     print(
-        f"Modal launcher starting: mode={args.mode}, selected={len(task_ids)} tasks, gpus={args.gpus}"
+        f"Modal launcher starting: config={config_path.name}, selected={len(task_ids)} tasks, gpus={args.gpus}"
     )
     for idx in task_ids:
         row = rows[idx - 1]
-        command, run_name = launch_fn(row, args, idx)
+        command, run_name = _build_wsds_command(row, args, idx)
 
         command_str = " ".join(shlex.quote(c) for c in command)
         if args.dry_run:
@@ -566,7 +509,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  {command_str}")
             continue
 
-        handle = run_training_command.remote(command, env_vars, run_name)
+        handle = run_training_command.spawn(command, env_vars, run_name)
         handles.append((idx, run_name, handle))
         print(f"Submitted task {idx} -> {run_name}")
 
@@ -577,7 +520,7 @@ def main(argv: list[str] | None = None) -> None:
     for idx, run_name, handle in handles:
         print(f"Waiting for task {idx} ({run_name})")
         try:
-            handle.result()
+            handle.get()
             print(f"Done: task {idx} ({run_name})")
         except Exception as exc:  # noqa: BLE001
             print(f"Failed: task {idx} ({run_name}) => {exc}")
