@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Fixed LM in-loop evaluator data-order drift across repeated runs by resetting loader bookkeeping before each pass and making deterministic reshuffling the default.
+
+### Changed
+
+- Added a documented `deterministic` option to `LMEvaluator` and `LMEvaluatorCallbackConfig` so callers can opt out of fixed eval ordering when desired.
+
+## [v2.5.0](https://github.com/allenai/OLMo-core/releases/tag/v2.5.0) - 2026-04-01
+
 ### Added
 
+- Added gradient dumping support to `GAPMonitorCallback`. Set `dump_gradients=True` to save raw gradient tensors during training. Supports full distributed checkpoints and preview mode (`dump_gradients_save_first_n`).
+- Added API reference and user guide for the `olmo_core.generate` module and interactive chat interface.
+- Added support for in-loop perplexity evals with context parallelism (CP) and tensor parallelism (TP).
 - Added documentation for verifying chat template settings before running evals after SFT.
 - Added `olmo_core.data.composable` module.
 - Added `PeriNormTransformerBlock`.
@@ -49,9 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mark ephemeral checkpoints with the `ephemeral` flag in their metadata.
 - Added `ephemeral: Optional[bool]` flag the `Checkpointer.find_checkpoints()` for filtering.
 - Added support for block-pattern based initialization of hybrid transformers. `TransformerConfig.block` now accepts a dict of named `TransformerBlockConfig`s, paired with a `block_pattern` list that controls per-layer block selection.
+- Added optional `vocab_size` field to `DataCollator` for validating token IDs are in `[0, vocab_size)` before the batch reaches the model. Wired through automatically in both `NumpyDataLoaderConfig` and `ComposableDataLoaderConfig`.
+- Added Olmo-hybrid official training configs and conversion script.
+- Added new in-loop eval tasks: Generative QA BPB tasks, expanded MT-MBPP languages, and Science/Medical RC tasks.
+- Added paged KV cache support to `FlashAttention4Backend` for inference on Blackwell (SM >= 10.0) GPUs.
+- Added Code Fresh per-language perplexity evals
 
 ### Fixed
 
+- Fixed `Transformer.get_rope_buffers()` crashing on non-rope attention mixers like `GatedDeltaNet`.
+- Fixed A100 peak flops spec in `SpeedMonitorCallback` being 2x too low, which inflated MFU by 2x.
 - Fixed `AttentionConfig.num_params()` overcounting QK norm parameters when using GQA/MQA with `use_head_qk_norm=False`.
 - Fixed the peak learning rate in `src/scripts/train/OLMo3/OLMo3-32B-midtraining.py` to the correct one.
 - Fixed type annotation issue in `NumpyInterleavedFSLDataset` where `_num_interleaving_exempt_instances` and `_num_interleavable_instances` were missing `Optional[int]` type hints, causing mypy type errors.
