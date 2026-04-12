@@ -145,10 +145,15 @@ def _gpu_type_from_argv(default: str = "H100") -> str:
 _MODAL_GPU_COUNT = _gpu_count_from_argv()
 _MODAL_GPU_TYPE = _gpu_type_from_argv()
 
+_docker_image = os.environ.get("OLMO_DOCKER_IMAGE", "ghcr.io/allenai/olmo-core:latest")
+_registry_secret = (
+    modal.Secret.from_name("ghcr-creds") if "ghcr.io/b-dickson" in _docker_image else None
+)
 _modal_image = (
     modal.Image.from_registry(
-        os.environ.get("OLMO_DOCKER_IMAGE", "ghcr.io/allenai/olmo-core:latest"),
+        _docker_image,
         add_python="3.12",
+        secret=_registry_secret,
     )
     .run_commands("pip install uv")
     .add_local_dir(str(REPO_ROOT), remote_path=REMOTE_REPO_PATH)
@@ -175,18 +180,24 @@ else:
 )
 def run_training_command(command: list[str], env_vars: dict[str, Any], run_name: str) -> None:
     # Install package at container startup (not baked into image, so it stays cached).
-    print("[Modal] Installing olmo-core and fixing torchvision...")
+    print("[Modal] Installing olmo-core...")
     sys.stdout.flush()
     subprocess.check_call(
         ["uv", "pip", "install", "-e", ".[all]", "--system"],
         cwd=str(REMOTE_LAUNCH_DIR),
     )
-    subprocess.check_call(
-        ["uv", "pip", "install", "torchvision", "--system", "--reinstall"],
-    )
 
     merged_env = os.environ.copy()
     merged_env.update({k: str(v) for k, v in env_vars.items()})
+
+    # Ensure PyTorch's bundled NVRTC is found before the host driver's version.
+    # Modal B200 hosts run CUDA 13.0 drivers, but the container has CUDA 12.x libs.
+    # Without this, erfinv_() JIT compilation fails with "libnvrtc-builtins.so.13.0 not found".
+    for _pyver in ("3.12", "3.11"):
+        _nvrtc_dir = f"/opt/conda/lib/python{_pyver}/site-packages/nvidia/cuda_nvrtc/lib"
+        if os.path.isdir(_nvrtc_dir):
+            merged_env["LD_LIBRARY_PATH"] = _nvrtc_dir + ":" + merged_env.get("LD_LIBRARY_PATH", "")
+            break
 
     aws_dir = Path.home() / ".aws"
     # Create AWS config/credentials files for R2 access from Modal secret env vars.
@@ -300,6 +311,12 @@ def _build_wsds_command(
         else f"{hc_prefix}{row.attention_type}-{chinchilla_multiple}x-{row.size}_seq{sequence_length}_{task_id}"
     )
 
+    # Map Modal GPU type to inner script --cluster so device_type resolves correctly
+    # (affects attention backend selection: flash_4 for B200, flash_3 for H100).
+    # The model configurator handles FA4 head_dim restrictions automatically.
+    gpu_type = args.gpu_type.upper() if hasattr(args, "gpu_type") else "H100"
+    cluster = "ai2/titan" if "B200" in gpu_type else "ai2/jupiter"
+
     command: list[str] = [
         "torchrun",
         "--standalone",
@@ -319,6 +336,7 @@ def _build_wsds_command(
         f"--max-gpus={args.gpus}",
         f"--wandb-entity={args.wandb_entity}",
         f"--project={args.project}",
+        f"--cluster={cluster}",
     ]
 
     if args.optimizer:

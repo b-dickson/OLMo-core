@@ -189,17 +189,16 @@ class AttentionLadder(ModelLadder):
             global_batch_size,
             rank_microbatch_size,
             requested_devices,
-            _,
+            dp_world_size,
         ) = self._configure_batch_size_and_num_devices(size_spec, num_params)
 
-        # With no_grad_accum, set rank microbatch = global batch so there's only 1 accum step.
-        # We do this *after* the normal computation so global_batch_size is properly aligned
-        # to a multiple of sequence_length.
+        # With no_grad_accum, set rank microbatch so there's only 1 accum step.
+        # Each rank processes global_batch_size / dp_world_size tokens per step.
         if (
             isinstance(self.model_configurator, AttentionModelConfigurator)
             and self.model_configurator.no_grad_accum
         ):
-            rank_microbatch_size = global_batch_size
+            rank_microbatch_size = global_batch_size // dp_world_size
 
         if requested_devices != dist_utils.get_world_size():
             raise OLMoConfigurationError(
