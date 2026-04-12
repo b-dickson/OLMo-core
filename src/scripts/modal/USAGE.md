@@ -75,6 +75,26 @@ Modal account quotas can serialize parts of an array if you exceed concurrent-re
 | `--optimizer` | `muon` | Pass `skipstep_adamw` to switch. |
 | `--ladder-root-dir` | `r2://llm-data/checkpoints` | Maps to `LADDER_ROOT_DIR` env var. |
 
+## B200 with no gradient accumulation
+
+The `--no-grad-accum` flag sets `rank_microbatch_size = global_batch_size / dp_world_size`, so the full batch is processed in one step with no gradient accumulation. The number of GPUs needed depends on model size:
+
+```bash
+# 60M vanilla gated on 1x B200, no grad accum
+modal run src/scripts/modal/attention_ladder_modal.py -- \
+  --config-file=src/scripts/lair/wsds_vanilla_gated.txt \
+  --array=1 --gpus=1 --gpu-type=B200 --no-grad-accum
+
+# 100M vanilla gated on 2x B200, no grad accum
+modal run src/scripts/modal/attention_ladder_modal.py -- \
+  --config-file=src/scripts/lair/wsds_vanilla_gated.txt \
+  --array=2 --gpus=2 --gpu-type=B200 --no-grad-accum
+```
+
+The Chinchilla-optimal batch size for 60M is ~220k tokens (~28 sequences of 8192), which fits on a single B200. The 100M model's batch (~327k tokens, 40 sequences) requires 2x B200.
+
+For larger models (190M+), you will likely need more GPUs or gradient accumulation to hit the optimal batch size.
+
 ## Dry-run modes
 
 The launcher supports two distinct dry-run modes:
@@ -142,6 +162,38 @@ OLMO_DOCKER_IMAGE=ghcr.io/your-org/olmo-core:custom \
 ```
 
 At container startup the launcher runs `uv pip install -e .[all] --system` from the mounted repo to pick up any local source edits.
+
+### B200 image requirement
+
+The upstream `ghcr.io/allenai/olmo-core:latest` image may not support B200 (Blackwell, sm_100). If you get errors like `NVIDIA B200 with CUDA capability sm_100 is not compatible` or `failed to open libnvrtc-builtins.so`, you need an image built from the current Dockerfile (PyTorch 2.10.0 + CUDA 12.8 + sm_100 support).
+
+Build and push to your own registry:
+
+```bash
+sudo make docker-image
+IMAGE_TAG=$(date "+tch2100cu128-%Y-%m-%d")
+docker tag olmo-core:$IMAGE_TAG ghcr.io/b-dickson/olmo-core:latest
+docker push ghcr.io/b-dickson/olmo-core:latest
+```
+
+Then use it:
+
+```bash
+OLMO_DOCKER_IMAGE=ghcr.io/b-dickson/olmo-core:latest \
+  uv run modal run src/scripts/modal/attention_ladder_modal.py -- \
+  --config-file=src/scripts/lair/wsds_vanilla_gated.txt \
+  --array=1,2 --gpus=1 --gpu-type=B200 --no-grad-accum
+```
+
+If the image is in a private GHCR registry, create a Modal secret with your credentials:
+
+```bash
+modal secret create ghcr-creds \
+  REGISTRY_USERNAME=<github-username> \
+  REGISTRY_PASSWORD=<github-pat-with-read:packages>
+```
+
+The launcher automatically uses the `ghcr-creds` secret when pulling from `ghcr.io/b-dickson`.
 
 ## Notes
 
