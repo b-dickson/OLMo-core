@@ -236,8 +236,8 @@ class Olmo3ModelConfigurator(TransformerModelConfigurator):
             except RuntimeError:
                 pass
 
-        # FA4 backward CUTLASS kernels require head_dim >= 64. Fall back to flash_3
-        # for smaller models (e.g. 60M with head_dim=48).
+        # FA4 backward CUTLASS kernels require head_dim >= 64. On B200 fall back to
+        # flash_2 (flash_3 is restricted to Hopper sm_90). On Hopper fall back to flash_3.
         if attn_backend == AttentionBackendName.flash_4:
             _fa4_min_head_dim = 64
             _d_model_for_size: dict[str, tuple[int, int]] = {
@@ -246,11 +246,10 @@ class Olmo3ModelConfigurator(TransformerModelConfigurator):
             if size_spec in _d_model_for_size:
                 d, nh = _d_model_for_size[size_spec]
                 if d // nh < _fa4_min_head_dim:
-                    try:
-                        AttentionBackendName.flash_3.assert_supported()
+                    if "b200" in device_type:
+                        attn_backend = AttentionBackendName.flash_2
+                    else:
                         attn_backend = AttentionBackendName.flash_3
-                    except RuntimeError:
-                        pass
                     warn_once(
                         f"FA4 does not support head_dim={d // nh} in the backward pass "
                         f"(requires >= {_fa4_min_head_dim}). Falling back to {attn_backend.value}.",
