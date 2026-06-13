@@ -10,7 +10,7 @@
 #SBATCH --mail-type=None
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --time=48:00:00
+#SBATCH --time=72:00:00
 # Submit with: sbatch --array=1-4 src/scripts/lair/slurm_wsds_vanilla_gated_h100.sh
 
 CONFIG_FILE="${CONFIG_FILE:-src/scripts/lair/wsds_vanilla_gated.txt}"
