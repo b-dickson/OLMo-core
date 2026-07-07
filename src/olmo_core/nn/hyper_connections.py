@@ -109,7 +109,12 @@ class HyperConnectionStream(nn.Module):
         :returns: Tuple of (h_pre, h_post), each of shape ``(..., n)``.
         """
         flat = H.flatten(-2, -1)  # (..., n*d)
-        proj = self.phi(flat)  # (..., 2n)
+        # The phi projection and the alpha/bias parameters may be stored in a higher
+        # precision than the activations (e.g. fp32 HC params with a bf16 model). Run the
+        # projection in the parameter dtype to avoid a matmul dtype mismatch on the
+        # no-autocast inference path, then cast the resulting stream weights back to the
+        # activation dtype so the downstream stream arithmetic stays in H's dtype.
+        proj = self.phi(flat.to(self.phi.weight.dtype))  # (..., 2n)
 
         h_pre = torch.sigmoid(
             self.alpha_pre * proj[..., : self.n_streams] + self.bias[: self.n_streams]
@@ -117,7 +122,7 @@ class HyperConnectionStream(nn.Module):
         h_post = 2.0 * torch.sigmoid(
             self.alpha_post * proj[..., self.n_streams :] + self.bias[self.n_streams :]
         )
-        return h_pre, h_post
+        return h_pre.to(H.dtype), h_post.to(H.dtype)
 
     def merge(self, H: torch.Tensor) -> torch.Tensor:
         """

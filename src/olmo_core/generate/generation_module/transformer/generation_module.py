@@ -110,8 +110,11 @@ class TransformerGenerationModule(GenerationModule):
         # is called "prepare_inference_cache" rather than "prepare_kv_cache".
         # For example, Mamba requires cache state but doesn't use a kv-cache.
         for block in self.model.blocks.values():
-            assert isinstance(block.attention, Attention)
-            attn = cast(Attention, block.attention)
+            # Hybrid/linear blocks (e.g. FLA / Gated DeltaNet) have no softmax-attention
+            # KV cache; skip them rather than asserting every block is an Attention block.
+            attn = getattr(block, "attention", None)
+            if not isinstance(attn, Attention):
+                continue
             if attn.kv_cache_manager is None:
                 attn.init_kv_cache_manager(batch_size, max_seq_len)
             else:
@@ -119,8 +122,9 @@ class TransformerGenerationModule(GenerationModule):
 
     def free_inference_cache(self):
         for block in self.model.blocks.values():
-            assert isinstance(block.attention, Attention)
-            cast(Attention, block.attention).kv_cache_manager = None
+            attn = getattr(block, "attention", None)
+            if isinstance(attn, Attention):
+                attn.kv_cache_manager = None
 
     def _set_model_mode(self, mode: Literal["train", "eval"]):
         if self._model_mode != mode:
