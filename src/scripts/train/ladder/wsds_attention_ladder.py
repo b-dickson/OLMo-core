@@ -505,6 +505,9 @@ def configure_ladder(args: argparse.Namespace) -> ModelLadder:
         data_loader=ComposableDataLoaderConfig(
             num_workers=8,
             instance_filter_config=InstanceFilterConfig(),
+            # Allow resuming a checkpoint whose data is the same content at a different source
+            # path (e.g. trained on local lair paths, resumed against R2). Toggled per-run via env.
+            ignore_fingerprint_mismatch=os.environ.get("OLMO_IGNORE_FINGERPRINT_MISMATCH") == "1",
         ),
         eval_data_base_dir=args.eval_data_dir,
         backend=None if args.backend == "none" else args.backend,

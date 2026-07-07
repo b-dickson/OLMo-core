@@ -86,6 +86,13 @@ class ComposableDataLoaderConfig(DataLoaderConfig["ComposableDataLoader"]):
     generate_doc_lengths: bool = False
     instance_filter_config: Optional[InstanceFilterConfig] = None
     display_source_visualization: bool = True
+    ignore_fingerprint_mismatch: bool = False
+    """
+    If ``True``, bypass the source-fingerprint equality check when restoring data loader state.
+    Use this to resume a run whose data is the same content at a different source path (e.g. a
+    checkpoint trained against local data paths resumed against R2 paths). The restored token
+    position is kept; the data order may differ.
+    """
 
     def __post_init__(self, *args):
         del args
@@ -160,6 +167,7 @@ class ComposableDataLoaderConfig(DataLoaderConfig["ComposableDataLoader"]):
             generate_doc_lengths=self.generate_doc_lengths,
             instance_filter_config=self.instance_filter_config,
             display_source_visualization=self.display_source_visualization,
+            ignore_fingerprint_mismatch=self.ignore_fingerprint_mismatch,
         )
 
 
@@ -216,7 +224,9 @@ class ComposableDataLoader(TextDataLoaderBase):
         generate_doc_lengths: bool = False,
         instance_filter_config: Optional[InstanceFilterConfig] = None,
         display_source_visualization: bool = True,
+        ignore_fingerprint_mismatch: bool = False,
     ):
+        self.ignore_fingerprint_mismatch = ignore_fingerprint_mismatch
         if not sources:
             raise OLMoConfigurationError("'sources' must contain at least one InstanceSource.")
 
@@ -379,9 +389,18 @@ class ComposableDataLoader(TextDataLoaderBase):
                         "Restoring data loader state after appending new sources can only be done "
                         "when the original sources haven't been iterated over yet!"
                     )
+            elif self.ignore_fingerprint_mismatch:
+                log.warning(
+                    "Data loader source fingerprints don't match the checkpoint, but "
+                    "'ignore_fingerprint_mismatch' is set. Continuing with the restored token "
+                    "position; the data order may differ. This is expected when resuming a run "
+                    "with the same data at a different source path (e.g. local -> R2)."
+                )
             else:
                 raise RuntimeError(
-                    "Restoring data loader state from different dataset source is not supported (fingerprints don't match)!"
+                    "Restoring data loader state from different dataset source is not supported "
+                    "(fingerprints don't match)! Set 'ignore_fingerprint_mismatch=True' on the "
+                    "data loader config to bypass this (data order may differ)."
                 )
 
         if state_dict["max_sequence_length"] != self.max_sequence_length:
