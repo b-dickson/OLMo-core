@@ -384,7 +384,7 @@ class CosWithWarmup(Scheduler):
             return eta_min + (initial_lr - eta_min) * (1 + cos(pi * current / t_max)) / 2
 
 
-@Scheduler.register("half_cos_with_warmup")
+@Scheduler.register("cos_with_warmdown")
 @dataclass
 class CosWithWarmdown(Scheduler):
     """
@@ -450,6 +450,7 @@ class CosWithWarmdown(Scheduler):
             )
 
 
+@Scheduler.register("half_cos_with_warmup")
 @dataclass
 class HalfCosWithWarmup(Scheduler):
     """
