@@ -176,7 +176,12 @@ else:
     image=_modal_image,
     timeout=86400,
     retries=0,
-    secrets=[modal.Secret.from_name(MODAL_SECRET_NAME)],
+    # r2-creds: R2/S3 access for data + checkpoints. billy-wandb-creds: WANDB_API_KEY so the
+    # WandBCallback can authenticate and log online from inside the container.
+    secrets=[
+        modal.Secret.from_name(MODAL_SECRET_NAME),
+        modal.Secret.from_name("billy-wandb-creds"),
+    ],
 )
 def run_training_command(command: list[str], env_vars: dict[str, Any], run_name: str) -> None:
     # Install package at container startup (not baked into image, so it stays cached).
@@ -186,6 +191,27 @@ def run_training_command(command: list[str], env_vars: dict[str, Any], run_name:
         ["uv", "pip", "install", "-e", ".[all]", "--system"],
         cwd=str(REMOTE_LAUNCH_DIR),
     )
+
+    # Realign torchvision to the image's torch. The moving `:latest` base image drifts its
+    # torch/CUDA (seen torch 2.10/cu128 then 2.12/cu130), but `.[all]` (via ai2-olmo-eval ->
+    # torchmetrics) pulls a mismatched torchvision (e.g. 0.22+cu126), so importing the eval
+    # suite fails with "operator torchvision::nms does not exist". Reinstall torchvision from
+    # the pytorch wheel index matching the installed torch's CUDA tag.
+    try:
+        cu = subprocess.check_output(
+            [sys.executable, "-c", "import torch;print('cu'+(torch.version.cuda or '').replace('.',''))"],
+            text=True,
+        ).strip()
+        if cu and cu != "cu":
+            print(f"[Modal] Realigning torchvision to {cu} (match image torch)...")
+            sys.stdout.flush()
+            subprocess.check_call(
+                ["uv", "pip", "install", "--system", "torchvision",
+                 "--index-url", f"https://download.pytorch.org/whl/{cu}",
+                 "--reinstall-package", "torchvision"],
+            )
+    except subprocess.CalledProcessError as e:
+        print(f"[Modal] WARNING: torchvision realign failed ({e}); continuing.")
 
     merged_env = os.environ.copy()
     merged_env.update({k: str(v) for k, v in env_vars.items()})
@@ -305,11 +331,16 @@ def _build_wsds_command(
         else row.chinchilla_multiple
     )
     hc_prefix = f"hc{args.hyper_connections}-" if args.hyper_connections else ""
-    run_name = (
-        f"{args.run_name_prefix}-{task_id}"
-        if args.run_name_prefix
-        else f"{hc_prefix}{row.attention_type}-{chinchilla_multiple}x-{row.size}_seq{sequence_length}_{task_id}"
-    )
+    if getattr(args, "name_override", None):
+        # Exact run name, verbatim. Critical for RESUMING an existing run: the save folder is
+        # {LADDER_ROOT_DIR}/model-ladders/{name}/{size}, and the trainer auto-loads the latest
+        # checkpoint found there (load_strategy=if_available, loading optimizer+trainer state).
+        # The name must match the existing checkpoint directory exactly.
+        run_name = args.name_override
+    elif args.run_name_prefix:
+        run_name = f"{args.run_name_prefix}-{task_id}"
+    else:
+        run_name = f"{hc_prefix}{row.attention_type}-{chinchilla_multiple}x-{row.size}_seq{sequence_length}_{task_id}"
 
     # Map Modal GPU type to inner script --cluster so device_type resolves correctly
     # (affects attention backend selection: flash_4 for B200, flash_3 for H100).
@@ -357,6 +388,8 @@ def _build_wsds_command(
 def _collect_passthrough_env() -> dict[str, str]:
     keys = [
         "WANDB_MODE",
+        "WANDB_API_KEY",
+        "WANDB_ENTITY",
         "AWS_SHARED_CREDENTIALS_FILE",
         "AWS_CONFIG_FILE",
         "AWS_PROFILE",
@@ -462,6 +495,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional explicit run-name prefix.",
     )
     parser.add_argument(
+        "--name-override",
+        default=None,
+        help=(
+            "Exact run name, used verbatim (ignores task_id). Use this to RESUME an existing "
+            "run: pass the existing checkpoint directory name so the save folder matches and "
+            "the trainer auto-loads the latest checkpoint. Only valid with a single --array index."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -485,6 +527,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Disable gradient accumulation (set rank microbatch = global batch).",
     )
     parser.add_argument(
+        "--ignore-fingerprint-mismatch",
+        action="store_true",
+        default=False,
+        help=(
+            "Bypass the data-loader source-fingerprint check when resuming. Use when resuming a "
+            "checkpoint whose data is the same content at a different source path (e.g. trained on "
+            "local lair paths, resumed against R2). Data order may differ."
+        ),
+    )
+    parser.add_argument(
         "--show-plot",
         action="store_true",
         default=False,
@@ -501,6 +553,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.ladder_root_dir:
         env_vars["LADDER_ROOT_DIR"] = args.ladder_root_dir
     env_vars["FORCE_MIN_WORLD_SIZE"] = str(args.gpus)
+    if args.ignore_fingerprint_mismatch:
+        # Resume a checkpoint whose data is the same content at a different source path
+        # (e.g. trained on local lair paths, resumed against R2). Read by the ladder's
+        # ComposableDataLoaderConfig.
+        env_vars["OLMO_IGNORE_FINGERPRINT_MISMATCH"] = "1"
 
     config_path = Path(args.config_file) if args.config_file else DEFAULT_WSDS_CONFIG
     rows = load_wsds_rows(config_path)
